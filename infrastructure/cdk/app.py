@@ -11,7 +11,7 @@ app = cdk.App()
 
 env = cdk.Environment(
     account=app.node.try_get_context("account"),
-    region=app.node.try_get_context("region") or "us-east-1",
+    region=app.node.try_get_context("region") or "us-west-1",
 )
 
 database_stack = DatabaseStack(app, "FoodDelivery-Database", env=env)
