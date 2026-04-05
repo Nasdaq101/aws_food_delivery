@@ -76,7 +76,7 @@ class ComputeStack(Stack):
             "restaurants_table": ["restaurant-service", "search-service", "admin-service"],
             "menus_table": ["menu-service", "search-service"],
             "orders_table": ["order-service", "admin-service", "analytics-service"],
-            "carts_table": ["cart-service"],
+            "carts_table": ["cart-service", "order-service"],
             "drivers_table": ["driver-service", "delivery-service"],
             "deliveries_table": ["delivery-service", "tracking-service"],
             "ratings_table": ["rating-service"],

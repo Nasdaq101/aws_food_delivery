@@ -8,3 +8,6 @@ cdk.out/
 .DS_Store
 *.egg-info/
 .venv/
+
+# Local config for testing (auto-generated on S3)
+frontend/js/config.js

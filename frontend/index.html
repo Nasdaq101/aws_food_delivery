@@ -3,6 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' https://images.unsplash.com data:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' https://*.amazonaws.com;">
     <title>QuickBite - Food Delivery</title>
     <link rel="stylesheet" href="css/style.css">
 </head>
@@ -72,6 +73,7 @@
         <!-- Restaurant Detail -->
         <section id="page-restaurant-detail" class="page">
             <div class="section">
+                <button class="btn btn-outline" onclick="goBack()" style="margin-bottom: 1rem;">← Back</button>
                 <div id="restaurant-header"></div>
                 <h3>Menu</h3>
                 <div id="menu-list" class="menu-grid"></div>
@@ -146,11 +148,25 @@
                 <p>Already have an account? <a href="#" onclick="showPage('login')">Login</a></p>
             </div>
         </section>
+
+        <!-- Email Verification -->
+        <section id="page-verify" class="page">
+            <div class="auth-form">
+                <h2>Verify Email</h2>
+                <p>We've sent a verification code to <strong id="verify-email-display"></strong></p>
+                <form onsubmit="handleVerify(event)">
+                    <input type="text" id="verify-code" placeholder="Enter 6-digit code" required maxlength="6" pattern="[0-9]{6}">
+                    <button type="submit" class="btn btn-primary btn-full">Verify Email</button>
+                </form>
+                <p><a href="#" onclick="showPage('login')">Back to Login</a></p>
+            </div>
+        </section>
     </main>
 
     <!-- Toast Notification -->
     <div id="toast" class="toast hidden"></div>
 
+    <script src="js/config.js"></script>
     <script src="js/app.js"></script>
 </body>
 </html>
