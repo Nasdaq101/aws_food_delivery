@@ -32,6 +32,7 @@ api_stack = ApiStack(
     app, "FoodDelivery-Api",
     compute_stack=compute_stack,
     auth_stack=auth_stack,
+    storage_stack=storage_stack,
     env=env,
 )
 

@@ -49,6 +49,12 @@ class ComputeStack(Stack):
         }
 
         for svc in SERVICES:
+            # Add Cognito env vars for auth-service
+            env_vars = {**common_env}
+            if svc == "auth-service":
+                env_vars["COGNITO_USER_POOL_ID"] = auth_stack.user_pool.user_pool_id
+                env_vars["COGNITO_CLIENT_ID"] = auth_stack.user_pool_client.user_pool_client_id
+
             fn = _lambda.Function(
                 self,
                 f"Fn-{svc}",
@@ -58,7 +64,7 @@ class ComputeStack(Stack):
                 code=_lambda.Code.from_asset(f"../../services/{svc}"),
                 timeout=Duration.seconds(30),
                 memory_size=256,
-                environment={**common_env},
+                environment=env_vars,
             )
             self.functions[svc] = fn
 
@@ -82,8 +88,11 @@ class ComputeStack(Stack):
 
         for table_attr, svc_list in table_service_map.items():
             table = getattr(database_stack, table_attr)
+            env_var_name = table_attr.upper() + "_NAME"  # e.g., "users_table" -> "USERS_TABLE_NAME"
             for svc in svc_list:
                 table.grant_read_write_data(self.functions[svc])
+                # Add table name to Lambda environment
+                self.functions[svc].add_environment(env_var_name, table.table_name)
 
         # S3 access
         storage_stack.images_bucket.grant_read(self.functions["restaurant-service"])
