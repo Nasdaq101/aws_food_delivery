@@ -644,7 +644,8 @@ async function loadOrders() {
         container.innerHTML = orders.length
             ? orders.map(renderOrderCard).join("")
             : '<div class="empty-state"><p>No orders yet</p></div>';
-    } catch {
+    } catch (err) {
+        console.error("Failed to load orders:", err);
         container.innerHTML = '<div class="empty-state"><p>Could not load orders</p></div>';
     }
 }
@@ -665,7 +666,7 @@ function renderOrderCard(order) {
                 ${(order.items || []).map((i) => `<span>${i.name} x${i.quantity}</span>`).join(", ")}
             </div>
             <div style="display: flex; justify-content: space-between; margin-top: 0.75rem">
-                <strong>$${(order.total || 0).toFixed(2)}</strong>
+                <strong>$${parseFloat(order.total || 0).toFixed(2)}</strong>
                 ${order.status === "delivering" ? `<button class="btn btn-primary btn-small" onclick="trackOrder('${order.order_id}')">Track</button>` : ""}
             </div>
         </div>

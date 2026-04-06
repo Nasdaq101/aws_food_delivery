@@ -49,6 +49,15 @@ def response(status_code, body):
 
 def lambda_handler(event, context):
     try:
+        # Check if this is a Step Functions invocation
+        if "action" in event:
+            action = event.get("action")
+            if action == "find_available":
+                return _find_available_drivers(event)
+            else:
+                return {"error": "Unknown action", "action": action}
+
+        # Otherwise, handle HTTP API calls
         method, path = _method_path(event)
         segs = _path_segments(path)
         try:
@@ -143,3 +152,51 @@ def _update_driver(driver_id, event):
         return response(404, {"error": "Driver not found"})
     except Exception as e:
         return response(500, {"error": str(e)})
+
+
+def _find_available_drivers(event):
+    """Called by Step Functions to find available drivers near a location"""
+    restaurant_location = event.get("restaurant_location") or {}
+
+    try:
+        # Scan for available drivers
+        scan_result = table.scan(
+            FilterExpression="#s = :status",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={":status": "available"},
+            Limit=20
+        )
+
+        drivers = scan_result.get("Items", [])
+
+        # In a real application, you would:
+        # 1. Filter drivers by proximity to restaurant_location
+        # 2. Sort by distance or rating
+        # 3. Consider driver capacity and current load
+
+        if not drivers:
+            return {
+                "available": False,
+                "driver_count": 0,
+                "drivers": []
+            }
+
+        # Select the best driver (for now, just pick the first one)
+        # In production, this would be based on proximity, rating, etc.
+        best_driver = drivers[0]
+
+        return {
+            "available": True,
+            "driver_count": len(drivers),
+            "drivers": drivers[:10],  # Return top 10 drivers
+            "best_driver": {
+                "driver_id": best_driver.get("driver_id"),
+                "name": best_driver.get("name"),
+                "vehicle_type": best_driver.get("vehicle_type"),
+                "rating": float(best_driver.get("rating", 0)),
+                "eta": 15  # Estimated time in minutes (placeholder)
+            }
+        }
+    except Exception as e:
+        print(f"Error finding drivers: {str(e)}")
+        return {"error": f"Failed to find drivers: {str(e)}", "available": False}

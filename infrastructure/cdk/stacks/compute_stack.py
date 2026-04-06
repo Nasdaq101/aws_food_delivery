@@ -2,6 +2,7 @@ from aws_cdk import (
     Stack,
     Duration,
     aws_lambda as _lambda,
+    aws_iam as iam,
 )
 from constructs import Construct
 
@@ -72,7 +73,7 @@ class ComputeStack(Stack):
 
         # DynamoDB access
         table_service_map = {
-            "users_table": ["user-service", "auth-service", "admin-service"],
+            "users_table": ["user-service", "auth-service", "admin-service", "order-service"],
             "restaurants_table": ["restaurant-service", "search-service", "admin-service"],
             "menus_table": ["menu-service", "search-service"],
             "orders_table": ["order-service", "admin-service", "analytics-service"],
@@ -113,3 +114,22 @@ class ComputeStack(Stack):
         messaging_stack.order_topic.grant_publish(self.functions["order-service"])
         messaging_stack.delivery_topic.grant_publish(self.functions["delivery-service"])
         messaging_stack.notification_topic.grant_publish(self.functions["notification-service"])
+
+        # ── Step Functions & SSM Permissions for order-service ──
+        # Allow order-service to start Step Functions workflows
+        self.functions["order-service"].add_to_role_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["states:StartExecution"],
+                resources=[f"arn:aws:states:{self.region}:{self.account}:stateMachine:FoodDelivery-*"],
+            )
+        )
+
+        # Allow order-service to read SSM parameters
+        self.functions["order-service"].add_to_role_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["ssm:GetParameter", "ssm:GetParameters"],
+                resources=[f"arn:aws:ssm:{self.region}:{self.account}:parameter/fooddelivery/*"],
+            )
+        )

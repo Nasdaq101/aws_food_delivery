@@ -6,6 +6,7 @@ from stacks.auth_stack import AuthStack
 from stacks.messaging_stack import MessagingStack
 from stacks.api_stack import ApiStack
 from stacks.compute_stack import ComputeStack
+from stacks.stepfunctions_stack import StepFunctionsStack
 
 app = cdk.App()
 
@@ -24,6 +25,13 @@ compute_stack = ComputeStack(
     database_stack=database_stack,
     storage_stack=storage_stack,
     auth_stack=auth_stack,
+    messaging_stack=messaging_stack,
+    env=env,
+)
+
+stepfunctions_stack = StepFunctionsStack(
+    app, "FoodDelivery-StepFunctions",
+    compute_stack=compute_stack,
     messaging_stack=messaging_stack,
     env=env,
 )
