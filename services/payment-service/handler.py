@@ -2,6 +2,7 @@ import json
 import os
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal
 
 import boto3
 
@@ -69,6 +70,17 @@ def response(status_code, body):
 
 def lambda_handler(event, context):
     try:
+        # Check if this is a Step Functions invocation
+        if "action" in event:
+            action = event.get("action")
+            if action == "charge":
+                return _charge_payment(event)
+            elif action == "refund":
+                return _refund_payment(event)
+            else:
+                return {"error": "Unknown action", "action": action}
+
+        # Otherwise, handle HTTP API calls
         method, path = _method_path(event)
         segs = _path_segments(path)
         try:
@@ -95,6 +107,7 @@ def _post_payment(event):
 
     try:
         amount_f = float(amount)
+        amount_decimal = Decimal(str(amount))
     except (TypeError, ValueError):
         return response(400, {"error": "amount must be a number"})
 
@@ -103,7 +116,7 @@ def _post_payment(event):
     item = {
         "payment_id": payment_id,
         "order_id": order_id,
-        "amount": amount_f,
+        "amount": amount_decimal,
         "currency": data.get("currency", "USD"),
         "status": "succeeded",
         "created_at": now,
@@ -122,7 +135,7 @@ def _post_payment(event):
         fail_item = {
             "payment_id": fail_id,
             "order_id": order_id,
-            "amount": amount_f,
+            "amount": amount_decimal,
             "currency": data.get("currency", "USD"),
             "status": "failed",
             "error": str(e),
@@ -149,3 +162,102 @@ def _get_payment(payment_id):
         return response(200, item)
     except Exception as e:
         return response(500, {"error": str(e)})
+
+
+def _charge_payment(event):
+    """Called by Step Functions to charge payment"""
+    order_id = event.get("order_id")
+    amount = event.get("amount")
+    user_id = event.get("user_id")
+
+    if not order_id or amount is None:
+        return {"error": "order_id and amount are required"}
+
+    payment_id = str(uuid.uuid4())
+    now = _utc_now_iso()
+
+    # Convert amount to Decimal for DynamoDB
+    amount_decimal = Decimal(str(amount))
+
+    # Simulate payment processing (in real app, call Stripe/PayPal API)
+    item = {
+        "payment_id": payment_id,
+        "order_id": order_id,
+        "user_id": user_id,
+        "amount": amount_decimal,
+        "currency": "USD",
+        "status": "succeeded",
+        "payment_method": "card",
+        "created_at": now,
+        "updated_at": now,
+    }
+
+    try:
+        table.put_item(Item=item)
+        _emit_payment_event(
+            "PaymentSucceeded",
+            {"payment_id": payment_id, "order_id": order_id, "amount": float(amount)},
+        )
+        return {
+            "success": True,
+            "payment_id": payment_id,
+            "status": "succeeded",
+            "amount": float(amount),
+        }
+    except Exception as e:
+        return {"error": f"Payment processing failed: {str(e)}"}
+
+
+def _refund_payment(event):
+    """Called by Step Functions to refund payment"""
+    payment_id = event.get("payment_id")
+    order_id = event.get("order_id")
+
+    if not payment_id:
+        return {"error": "payment_id is required"}
+
+    try:
+        # Get original payment
+        res = table.get_item(Key={"payment_id": payment_id})
+        payment = res.get("Item")
+
+        if not payment:
+            return {"error": "Payment not found"}
+
+        # Create refund record
+        refund_id = str(uuid.uuid4())
+        now = _utc_now_iso()
+
+        refund_item = {
+            "payment_id": refund_id,
+            "original_payment_id": payment_id,
+            "order_id": order_id or payment.get("order_id"),
+            "amount": payment.get("amount"),
+            "currency": payment.get("currency", "USD"),
+            "status": "refunded",
+            "created_at": now,
+            "updated_at": now,
+        }
+
+        table.put_item(Item=refund_item)
+
+        # Update original payment status
+        table.update_item(
+            Key={"payment_id": payment_id},
+            UpdateExpression="SET #status = :status, #updated = :updated",
+            ExpressionAttributeNames={"#status": "status", "#updated": "updated_at"},
+            ExpressionAttributeValues={":status": "refunded", ":updated": now},
+        )
+
+        _emit_payment_event(
+            "PaymentRefunded",
+            {"payment_id": payment_id, "refund_id": refund_id, "amount": payment.get("amount")},
+        )
+
+        return {
+            "success": True,
+            "refund_id": refund_id,
+            "amount": payment.get("amount"),
+        }
+    except Exception as e:
+        return {"error": f"Refund failed: {str(e)}"}

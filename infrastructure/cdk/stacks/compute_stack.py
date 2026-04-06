@@ -2,6 +2,7 @@ from aws_cdk import (
     Stack,
     Duration,
     aws_lambda as _lambda,
+    aws_iam as iam,
 )
 from constructs import Construct
 
@@ -49,6 +50,12 @@ class ComputeStack(Stack):
         }
 
         for svc in SERVICES:
+            # Add Cognito env vars for auth-service
+            env_vars = {**common_env}
+            if svc == "auth-service":
+                env_vars["COGNITO_USER_POOL_ID"] = auth_stack.user_pool.user_pool_id
+                env_vars["COGNITO_CLIENT_ID"] = auth_stack.user_pool_client.user_pool_client_id
+
             fn = _lambda.Function(
                 self,
                 f"Fn-{svc}",
@@ -58,7 +65,7 @@ class ComputeStack(Stack):
                 code=_lambda.Code.from_asset(f"../../services/{svc}"),
                 timeout=Duration.seconds(30),
                 memory_size=256,
-                environment={**common_env},
+                environment=env_vars,
             )
             self.functions[svc] = fn
 
@@ -66,11 +73,11 @@ class ComputeStack(Stack):
 
         # DynamoDB access
         table_service_map = {
-            "users_table": ["user-service", "auth-service", "admin-service"],
+            "users_table": ["user-service", "auth-service", "admin-service", "order-service"],
             "restaurants_table": ["restaurant-service", "search-service", "admin-service"],
             "menus_table": ["menu-service", "search-service"],
             "orders_table": ["order-service", "admin-service", "analytics-service"],
-            "carts_table": ["cart-service"],
+            "carts_table": ["cart-service", "order-service"],
             "drivers_table": ["driver-service", "delivery-service"],
             "deliveries_table": ["delivery-service", "tracking-service"],
             "ratings_table": ["rating-service"],
@@ -82,8 +89,11 @@ class ComputeStack(Stack):
 
         for table_attr, svc_list in table_service_map.items():
             table = getattr(database_stack, table_attr)
+            env_var_name = table_attr.upper() + "_NAME"  # e.g., "users_table" -> "USERS_TABLE_NAME"
             for svc in svc_list:
                 table.grant_read_write_data(self.functions[svc])
+                # Add table name to Lambda environment
+                self.functions[svc].add_environment(env_var_name, table.table_name)
 
         # S3 access
         storage_stack.images_bucket.grant_read(self.functions["restaurant-service"])
@@ -104,3 +114,22 @@ class ComputeStack(Stack):
         messaging_stack.order_topic.grant_publish(self.functions["order-service"])
         messaging_stack.delivery_topic.grant_publish(self.functions["delivery-service"])
         messaging_stack.notification_topic.grant_publish(self.functions["notification-service"])
+
+        # ── Step Functions & SSM Permissions for order-service ──
+        # Allow order-service to start Step Functions workflows
+        self.functions["order-service"].add_to_role_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["states:StartExecution"],
+                resources=[f"arn:aws:states:{self.region}:{self.account}:stateMachine:FoodDelivery-*"],
+            )
+        )
+
+        # Allow order-service to read SSM parameters
+        self.functions["order-service"].add_to_role_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["ssm:GetParameter", "ssm:GetParameters"],
+                resources=[f"arn:aws:ssm:{self.region}:{self.account}:parameter/fooddelivery/*"],
+            )
+        )

@@ -124,6 +124,34 @@ def handle_login(body: dict):
         return response(400, {"error": code, "message": str(e)})
 
 
+def handle_verify(body: dict):
+    """Confirm user email with verification code"""
+    email = (body.get("email") or "").strip().lower()
+    code = (body.get("code") or "").strip()
+
+    if not email or not code:
+        return response(400, {"error": "BadRequest", "message": "email and code are required"})
+    if not CLIENT_ID:
+        return response(500, {"error": "ConfigError", "message": "COGNITO_CLIENT_ID must be set"})
+
+    try:
+        cognito.confirm_sign_up(
+            ClientId=CLIENT_ID,
+            Username=email,
+            ConfirmationCode=code
+        )
+        return response(200, {"message": "Email verified successfully"})
+    except ClientError as e:
+        code_err = e.response["Error"]["Code"]
+        if code_err == "CodeMismatchException":
+            return response(400, {"error": "BadRequest", "message": "Invalid verification code"})
+        if code_err == "ExpiredCodeException":
+            return response(400, {"error": "BadRequest", "message": "Verification code expired"})
+        if code_err == "UserNotFoundException":
+            return response(404, {"error": "NotFound", "message": "User not found"})
+        return response(400, {"error": code_err, "message": str(e)})
+
+
 def lambda_handler(event, context):
     try:
         http_method = event.get("httpMethod", "")
@@ -134,6 +162,8 @@ def lambda_handler(event, context):
             return handle_signup(body)
         if http_method == "POST" and path == "/auth/login":
             return handle_login(body)
+        if http_method == "POST" and path == "/auth/verify":
+            return handle_verify(body)
 
         return response(404, {"error": "NotFound", "message": "No route matched"})
     except json.JSONDecodeError:

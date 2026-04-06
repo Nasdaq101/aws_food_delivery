@@ -6,12 +6,13 @@ from stacks.auth_stack import AuthStack
 from stacks.messaging_stack import MessagingStack
 from stacks.api_stack import ApiStack
 from stacks.compute_stack import ComputeStack
+from stacks.stepfunctions_stack import StepFunctionsStack
 
 app = cdk.App()
 
 env = cdk.Environment(
     account=app.node.try_get_context("account"),
-    region=app.node.try_get_context("region") or "us-east-1",
+    region=app.node.try_get_context("region") or "us-west-1",
 )
 
 database_stack = DatabaseStack(app, "FoodDelivery-Database", env=env)
@@ -28,10 +29,18 @@ compute_stack = ComputeStack(
     env=env,
 )
 
+stepfunctions_stack = StepFunctionsStack(
+    app, "FoodDelivery-StepFunctions",
+    compute_stack=compute_stack,
+    messaging_stack=messaging_stack,
+    env=env,
+)
+
 api_stack = ApiStack(
     app, "FoodDelivery-Api",
     compute_stack=compute_stack,
     auth_stack=auth_stack,
+    storage_stack=storage_stack,
     env=env,
 )
 

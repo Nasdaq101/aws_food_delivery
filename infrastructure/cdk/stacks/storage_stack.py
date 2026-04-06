@@ -1,6 +1,7 @@
 from aws_cdk import (
     Stack,
     RemovalPolicy,
+    CfnOutput,
     aws_s3 as s3,
     aws_cloudfront as cloudfront,
     aws_cloudfront_origins as origins,
@@ -52,4 +53,17 @@ class StorageStack(Stack):
                     viewer_protocol_policy=cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
                 ),
             },
+        )
+
+        # ── Outputs ──
+        CfnOutput(
+            self, "CloudFrontUrl",
+            value=f"https://{self.distribution.distribution_domain_name}",
+            description="CloudFront distribution URL (HTTPS)"
+        )
+
+        CfnOutput(
+            self, "S3WebsiteUrl",
+            value=self.frontend_bucket.bucket_website_url,
+            description="S3 website URL (HTTP only)"
         )
