@@ -1,5 +1,6 @@
 // ── Configuration ──
 const API_BASE = window.APP_CONFIG?.API_BASE_URL || "";
+const WS_URL = window.APP_CONFIG?.WEBSOCKET_URL || "";
 
 
 let currentUser = null;
@@ -7,6 +8,450 @@ let authToken = null;
 let cart = { items: [] }; // Removed restaurant_id - now supports multiple restaurants
 let pendingVerificationEmail = null;
 let previousPage = "home"; // Track where we came from
+
+// WebSocket connection manager
+let wsConnection = null;
+let wsReconnectAttempts = 0;
+const WS_MAX_RECONNECT_ATTEMPTS = 5;
+const WS_RECONNECT_DELAY = 2000; // 2 seconds
+
+// Map tracking
+let trackingMap = null;
+let driverMarker = null;
+let restaurantMarker = null;
+let destinationMarker = null;
+let routeLine = null;
+let currentOrderData = null;
+
+
+// ── WebSocket Functions ──
+
+function connectWebSocket() {
+    if (!authToken) {
+        console.log("Cannot connect WebSocket: not authenticated");
+        return;
+    }
+
+    if (!WS_URL) {
+        console.error("WebSocket URL not configured");
+        return;
+    }
+
+    // Add JWT token as query parameter (used by authorizer)
+    const wsUrl = `${WS_URL}?token=${encodeURIComponent(authToken)}`;
+
+    try {
+        wsConnection = new WebSocket(wsUrl);
+
+        wsConnection.onopen = () => {
+            console.log("WebSocket connected");
+            wsReconnectAttempts = 0;
+            showToast("Real-time tracking connected", "success");
+        };
+
+        wsConnection.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            handleWebSocketMessage(data);
+        };
+
+        wsConnection.onerror = (error) => {
+            console.error("WebSocket error:", error);
+        };
+
+        wsConnection.onclose = () => {
+            console.log("WebSocket disconnected");
+            wsConnection = null;
+
+            // Attempt reconnection
+            if (wsReconnectAttempts < WS_MAX_RECONNECT_ATTEMPTS) {
+                wsReconnectAttempts++;
+                console.log(`Reconnecting... attempt ${wsReconnectAttempts}`);
+                setTimeout(connectWebSocket, WS_RECONNECT_DELAY * wsReconnectAttempts);
+            }
+        };
+    } catch (error) {
+        console.error("Failed to create WebSocket:", error);
+    }
+}
+
+function disconnectWebSocket() {
+    if (wsConnection && wsConnection.readyState === WebSocket.OPEN) {
+        wsConnection.close();
+    }
+    wsConnection = null;
+}
+
+function sendWebSocketMessage(action, data) {
+    if (!wsConnection || wsConnection.readyState !== WebSocket.OPEN) {
+        console.error("WebSocket not connected");
+        return false;
+    }
+
+    wsConnection.send(JSON.stringify({ action, ...data }));
+    return true;
+}
+
+function handleWebSocketMessage(data) {
+    console.log("WebSocket message received:", data);
+
+    // Handle both 'type' and 'action' fields (backend might use either)
+    const messageType = data.type || data.action;
+
+    console.log("Message type:", messageType);
+
+    switch (messageType) {
+        case "status":
+            updateOrderStatus(data);
+            break;
+        case "location":
+        case "locationUpdate":  // From sendLocation route
+            console.log("Calling updateDriverLocation with:", data);
+            updateDriverLocation(data);
+            break;
+        default:
+            console.log("Unknown WebSocket message type:", messageType, data);
+    }
+}
+
+function updateOrderStatus(data) {
+    console.log("Order status update:", data);
+
+    const status = (data.status || "").toLowerCase();
+
+    // Update order card in orders list if visible
+    const orderCard = document.querySelector(`[data-order-id="${data.order_id}"]`);
+    if (orderCard) {
+        const statusBadge = orderCard.querySelector(".order-status");
+        if (statusBadge) {
+            statusBadge.textContent = data.status.toUpperCase();
+            statusBadge.className = `order-status status-${status}`;
+        }
+    }
+
+    // Update tracking timeline if on tracking page
+    updateTrackingTimeline(data.order_id, data.status);
+
+    // Show notification
+    const statusMessages = {
+        "confirmed": "Your order has been confirmed!",
+        "preparing": "Restaurant is preparing your food",
+        "delivering": "Driver is on the way!",
+        "completed": "Order delivered! Enjoy your meal!",
+        "delivered": "Order delivered! Enjoy your meal!",
+        "cancelled": "Order has been cancelled"
+    };
+
+    const message = statusMessages[status] || `Order status: ${data.status}`;
+    showToast(message, status === "cancelled" ? "error" : "success");
+}
+
+function initializeTrackingMap(orderData) {
+    const mapContainer = document.getElementById("tracking-map");
+    const mapLegend = document.getElementById("map-legend");
+    if (!mapContainer) return;
+
+    // Store order data for updates
+    currentOrderData = orderData;
+
+    // Show map container and legend
+    mapContainer.style.display = "block";
+    if (mapLegend) mapLegend.style.display = "block";
+
+    // Parse locations with fallbacks to San Francisco area
+    const restaurantLoc = parseLocation(orderData.restaurant_location, { lat: 37.7849, lng: -122.4094 });
+    const deliveryLoc = parseLocation(orderData.delivery_address, { lat: 37.7749, lng: -122.4194 });
+    const driverLoc = orderData.driver_location ? parseLocation(orderData.driver_location) : null;
+
+    // Initialize map if not already done
+    if (!trackingMap) {
+        const centerLat = restaurantLoc.lat;
+        const centerLng = restaurantLoc.lng;
+        trackingMap = L.map("tracking-map").setView([centerLat, centerLng], 13);
+
+        // Add OpenStreetMap tiles
+        L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+            attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+            maxZoom: 19,
+        }).addTo(trackingMap);
+    }
+
+    // Add restaurant marker
+    if (!restaurantMarker && restaurantLoc) {
+        restaurantMarker = L.marker([restaurantLoc.lat, restaurantLoc.lng], {
+            icon: L.divIcon({
+                className: "restaurant-marker",
+                html: '<div style="background: #457b9d; color: white; padding: 10px; border-radius: 50%; width: 45px; height: 45px; display: flex; align-items: center; justify-content: center; font-size: 22px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); border: 3px solid white;">🍽️</div>',
+                iconSize: [45, 45],
+                iconAnchor: [22.5, 22.5],
+            }),
+        }).addTo(trackingMap);
+        restaurantMarker.bindPopup("<b>Restaurant</b><br>Preparing your order");
+    }
+
+    // Add destination marker
+    if (!destinationMarker && deliveryLoc) {
+        destinationMarker = L.marker([deliveryLoc.lat, deliveryLoc.lng], {
+            icon: L.divIcon({
+                className: "destination-marker",
+                html: '<div style="background: #2d6a4f; color: white; padding: 10px; border-radius: 50%; width: 45px; height: 45px; display: flex; align-items: center; justify-content: center; font-size: 22px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); border: 3px solid white;">🏠</div>',
+                iconSize: [45, 45],
+                iconAnchor: [22.5, 22.5],
+            }),
+        }).addTo(trackingMap);
+        destinationMarker.bindPopup("<b>Delivery Address</b><br>Your location");
+    }
+
+    // Add driver marker if available
+    if (driverLoc) {
+        updateDriverMarkerOnMap(driverLoc.lat, driverLoc.lng);
+
+        // Draw route: Restaurant -> Driver -> Destination
+        drawRoute(restaurantLoc, driverLoc, deliveryLoc);
+    } else {
+        // Draw direct line from restaurant to destination (before driver assigned)
+        drawRoute(restaurantLoc, null, deliveryLoc);
+    }
+
+    // Fit bounds to show all markers
+    fitMapBounds(restaurantLoc, deliveryLoc, driverLoc, orderData.status);
+}
+
+function parseLocation(locationData, fallback = null) {
+    if (!locationData) return fallback;
+
+    // Handle different formats: {lat, lng}, "lat,lng", {latitude, longitude}
+    if (typeof locationData === 'string') {
+        const parts = locationData.split(',');
+        if (parts.length === 2) {
+            return { lat: parseFloat(parts[0]), lng: parseFloat(parts[1]) };
+        }
+    } else if (typeof locationData === 'object') {
+        if (locationData.lat !== undefined && locationData.lng !== undefined) {
+            return { lat: parseFloat(locationData.lat), lng: parseFloat(locationData.lng) };
+        } else if (locationData.latitude !== undefined && locationData.longitude !== undefined) {
+            return { lat: parseFloat(locationData.latitude), lng: parseFloat(locationData.longitude) };
+        }
+    }
+
+    return fallback;
+}
+
+function drawRoute(restaurantLoc, driverLoc, deliveryLoc) {
+    // Remove existing route line
+    if (routeLine) {
+        trackingMap.removeLayer(routeLine);
+    }
+
+    const points = [];
+
+    if (driverLoc) {
+        // Driver is on the way: Restaurant -> Driver -> Destination
+        points.push([restaurantLoc.lat, restaurantLoc.lng]);
+        points.push([driverLoc.lat, driverLoc.lng]);
+        points.push([deliveryLoc.lat, deliveryLoc.lng]);
+    } else {
+        // No driver yet: Restaurant -> Destination
+        points.push([restaurantLoc.lat, restaurantLoc.lng]);
+        points.push([deliveryLoc.lat, deliveryLoc.lng]);
+    }
+
+    // Draw polyline
+    routeLine = L.polyline(points, {
+        color: '#e63946',
+        weight: 4,
+        opacity: 0.7,
+        dashArray: driverLoc ? null : '10, 10',  // Dashed when no driver
+    }).addTo(trackingMap);
+}
+
+function updateDriverMarkerOnMap(lat, lng) {
+    if (!driverMarker) {
+        driverMarker = L.marker([lat, lng], {
+            icon: L.divIcon({
+                className: "driver-marker",
+                html: '<div style="background: #e63946; color: white; padding: 10px; border-radius: 50%; width: 45px; height: 45px; display: flex; align-items: center; justify-content: center; font-size: 22px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); border: 3px solid white; animation: pulse 2s infinite;">🚗</div>',
+                iconSize: [45, 45],
+                iconAnchor: [22.5, 22.5],
+            }),
+        }).addTo(trackingMap);
+        driverMarker.bindPopup("<b>Driver</b><br>On the way to you!");
+    } else {
+        // Animate marker to new position
+        driverMarker.setLatLng([lat, lng]);
+    }
+}
+
+function fitMapBounds(restaurantLoc, deliveryLoc, driverLoc, orderStatus) {
+    const bounds = [];
+
+    if (restaurantLoc) bounds.push([restaurantLoc.lat, restaurantLoc.lng]);
+    if (deliveryLoc) bounds.push([deliveryLoc.lat, deliveryLoc.lng]);
+    if (driverLoc) bounds.push([driverLoc.lat, driverLoc.lng]);
+
+    if (bounds.length > 0) {
+        const latLngBounds = L.latLngBounds(bounds);
+        trackingMap.fitBounds(latLngBounds, {
+            padding: [80, 80],
+            maxZoom: 15
+        });
+    }
+
+    // Focus on specific marker based on status
+    if (orderStatus === 'PREPARING' && restaurantLoc) {
+        setTimeout(() => trackingMap.setView([restaurantLoc.lat, restaurantLoc.lng], 14), 500);
+    } else if (orderStatus === 'DELIVERING' && driverLoc) {
+        setTimeout(() => trackingMap.setView([driverLoc.lat, driverLoc.lng], 14), 500);
+    }
+}
+
+function updateDriverLocation(data) {
+    console.log("updateDriverLocation called with:", data);
+    console.log("Map exists?", trackingMap !== null);
+    console.log("Driver marker exists?", driverMarker !== null);
+
+    const driverLoc = { lat: data.lat, lng: data.lng };
+    console.log("Driver location:", driverLoc);
+
+    // Update ETA display
+    const etaElement = document.getElementById("tracking-eta");
+    if (etaElement) {
+        if (data.eta) {
+            etaElement.innerHTML = `🕐 <strong>ETA:</strong> ${data.eta} minutes`;
+        } else {
+            // Calculate simple distance-based ETA (rough estimate)
+            if (currentOrderData && currentOrderData.delivery_address) {
+                const destLoc = parseLocation(currentOrderData.delivery_address);
+                if (destLoc) {
+                    const distance = calculateDistance(driverLoc.lat, driverLoc.lng, destLoc.lat, destLoc.lng);
+                    const eta = Math.ceil(distance / 0.5); // Assume 30 km/h average speed
+                    etaElement.innerHTML = `🕐 <strong>ETA:</strong> ~${eta} minutes`;
+                }
+            }
+        }
+    }
+
+    // Update driver location display
+    const locationElement = document.getElementById("driver-location");
+    if (locationElement) {
+        const timestamp = data.sent_at || data.timestamp || new Date().toISOString();
+        const timeStr = new Date(timestamp).toLocaleTimeString();
+        locationElement.innerHTML = `
+            <div style="padding: 0.75rem; background: linear-gradient(135deg, #e63946 0%, #c1121f 100%); color: white; border-radius: 8px; margin-top: 0.75rem;">
+                <div style="display: flex; align-items: center; margin-bottom: 0.5rem;">
+                    <span style="font-size: 1.5rem; margin-right: 0.5rem;">🚗</span>
+                    <strong style="font-size: 1rem;">Driver is on the way!</strong>
+                </div>
+                <span style="font-size: 0.8rem; opacity: 0.9;">Last updated: ${timeStr}</span>
+            </div>
+        `;
+        showToast("📍 Driver location updated", "success");
+    }
+
+    // Update map marker and route
+    if (trackingMap) {
+        console.log("Updating driver marker on map...");
+        updateDriverMarkerOnMap(driverLoc.lat, driverLoc.lng);
+
+        if (currentOrderData) {
+            // Redraw route with new driver position
+            const restaurantLoc = parseLocation(currentOrderData.restaurant_location, { lat: 37.7849, lng: -122.4094 });
+            const deliveryLoc = parseLocation(currentOrderData.delivery_address, { lat: 37.7749, lng: -122.4194 });
+            console.log("Redrawing route:", restaurantLoc, driverLoc, deliveryLoc);
+            drawRoute(restaurantLoc, driverLoc, deliveryLoc);
+        }
+
+        // Pan to driver location
+        console.log("Panning map to driver location");
+        trackingMap.panTo([driverLoc.lat, driverLoc.lng]);
+    } else {
+        console.log("❌ Map not initialized, cannot update driver location");
+    }
+}
+
+// Helper function to calculate distance between two points (Haversine formula)
+function calculateDistance(lat1, lon1, lat2, lon2) {
+    const R = 6371; // Radius of Earth in km
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLon = (lon2 - lon1) * Math.PI / 180;
+    const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+              Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+              Math.sin(dLon/2) * Math.sin(dLon/2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    return R * c; // Distance in km
+}
+
+function getStatusBasedInfo(order) {
+    const status = (order.status || "").toUpperCase();
+
+    if (status === "PLACED" || status === "PENDING") {
+        return `
+            <div style="background: linear-gradient(135deg, #fff3cd 0%, #ffeaa7 100%); padding: 1.5rem; border-radius: 8px; border-left: 4px solid #f39c12;">
+                <h4 style="margin: 0 0 0.5rem 0; font-size: 1rem; color: #856404;">📋 Order Received</h4>
+                <p style="color: #856404; margin: 0; font-size: 0.9rem;">
+                    We've received your order and are processing it. You'll be notified once the restaurant confirms!
+                </p>
+            </div>
+        `;
+    } else if (status === "CONFIRMED") {
+        return `
+            <div style="background: linear-gradient(135deg, #d1ecf1 0%, #bee5eb 100%); padding: 1.5rem; border-radius: 8px; border-left: 4px solid #17a2b8;">
+                <h4 style="margin: 0 0 0.5rem 0; font-size: 1rem; color: #0c5460;">✅ Restaurant Confirmed</h4>
+                <p style="color: #0c5460; margin: 0; font-size: 0.9rem;">
+                    The restaurant has confirmed your order. We're finding the best driver for you!
+                </p>
+            </div>
+        `;
+    } else if (status === "PREPARING") {
+        return `
+            <div style="background: linear-gradient(135deg, #d4edda 0%, #c3e6cb 100%); padding: 1.5rem; border-radius: 8px; border-left: 4px solid #28a745;">
+                <h4 style="margin: 0 0 0.5rem 0; font-size: 1rem; color: #155724;">👨‍🍳 Preparing Your Food</h4>
+                <p style="color: #155724; margin: 0 0 0.75rem 0; font-size: 0.9rem;">
+                    The restaurant is preparing your delicious meal. A driver will be assigned shortly!
+                </p>
+                <div id="tracking-eta" style="font-size: 1.1rem; font-weight: 600; color: #155724; margin-bottom: 0.5rem;"></div>
+                <div id="driver-location"></div>
+            </div>
+        `;
+    } else if (status === "DELIVERING" && order.delivery_id) {
+        return `
+            <div style="background: linear-gradient(135deg, #cce5ff 0%, #b8daff 100%); padding: 1.5rem; border-radius: 8px; border-left: 4px solid #004085;">
+                <h4 style="margin: 0 0 0.5rem 0; font-size: 1rem; color: #004085;">🚗 On the Way!</h4>
+                <p style="color: #004085; margin: 0.25rem 0 0.75rem 0; font-size: 0.9rem;">
+                    <strong>Delivery ID:</strong> ${order.delivery_id.substring(0, 8)}
+                </p>
+                <div id="tracking-eta" style="font-size: 1.1rem; font-weight: 600; color: #004085; margin-bottom: 0.5rem;"></div>
+                <div id="driver-location"></div>
+            </div>
+        `;
+    } else if (order.delivery_id && (status === "CONFIRMED" || status === "PLACED" || status === "PENDING")) {
+        // Show tracking info for any order with a delivery_id, even if not DELIVERING yet
+        return `
+            <div style="background: linear-gradient(135deg, #cce5ff 0%, #b8daff 100%); padding: 1.5rem; border-radius: 8px; border-left: 4px solid #004085;">
+                <h4 style="margin: 0 0 0.5rem 0; font-size: 1rem; color: #004085;">📍 Live Tracking Available</h4>
+                <p style="color: #004085; margin: 0.25rem 0 0.75rem 0; font-size: 0.9rem;">
+                    <strong>Delivery ID:</strong> ${order.delivery_id.substring(0, 8)}
+                </p>
+                <div id="tracking-eta" style="font-size: 1.1rem; font-weight: 600; color: #004085; margin-bottom: 0.5rem;"></div>
+                <div id="driver-location"></div>
+            </div>
+        `;
+    } else if (status === "COMPLETED" || status === "DELIVERED") {
+        return `
+            <div style="background: linear-gradient(135deg, #d4edda 0%, #c3e6cb 100%); padding: 1.5rem; border-radius: 8px; border-left: 4px solid #28a745; text-align: center;">
+                <h4 style="margin: 0 0 0.5rem 0; font-size: 1.2rem; color: #155724;">🎉 Delivered!</h4>
+                <p style="color: #155724; margin: 0; font-size: 0.9rem;">
+                    Your order has been delivered. Enjoy your meal!
+                </p>
+            </div>
+        `;
+    } else {
+        return `
+            <div style="background: var(--bg); padding: 1rem; border-radius: 6px; text-align: center;">
+                <p style="color: var(--text-light); font-style: italic; margin: 0;">⏳ Processing your order...</p>
+            </div>
+        `;
+    }
+}
 
 
 function showPage(pageId) {
@@ -28,6 +473,13 @@ function showPage(pageId) {
     if (pageId === "restaurants") loadRestaurants();
     if (pageId === "orders") loadOrders();
     if (pageId === "cart") renderCart();
+    if (pageId === "tracking") {
+        // If navigating directly to tracking without order ID, redirect to orders
+        const currentContent = document.getElementById("tracking-info")?.innerHTML || '';
+        if (!currentContent || currentContent.includes('Loading')) {
+            showPage("orders");
+        }
+    }
 }
 
 // Handle browser back/forward buttons
@@ -46,6 +498,13 @@ window.addEventListener('popstate', (event) => {
         if (pageId === "restaurants") loadRestaurants();
         if (pageId === "orders") loadOrders();
         if (pageId === "cart") renderCart();
+        if (pageId === "tracking") {
+            // If navigating back to tracking without order ID, redirect to orders
+            const currentContent = document.getElementById("tracking-info")?.innerHTML || '';
+            if (!currentContent || currentContent.includes('Loading')) {
+                showPage("orders");
+            }
+        }
     }
 });
 
@@ -166,6 +625,9 @@ async function onLoginSuccess() {
     // Load cart from backend
     await loadCartFromServer();
 
+    // Connect WebSocket for real-time updates
+    connectWebSocket();
+
     showToast("Welcome back!", "success");
     showPage("home");
 }
@@ -226,6 +688,9 @@ async function updateCartQuantityOnServer(lineId, quantity) {
 }
 
 async function logout() {
+    // Disconnect WebSocket before clearing token
+    disconnectWebSocket();
+
     // Don't clear cart on backend - it should persist!
     // Just clear local state
     currentUser = null;
@@ -641,6 +1106,13 @@ async function loadOrders() {
     try {
         const data = await apiCall("/orders");
         const orders = data.orders || data || [];
+
+        // Debug: log the orders to see actual status values
+        console.log("Loaded orders:", orders);
+        if (orders.length > 0) {
+            console.log("First order status:", orders[0].status, "Type:", typeof orders[0].status);
+        }
+
         container.innerHTML = orders.length
             ? orders.map(renderOrderCard).join("")
             : '<div class="empty-state"><p>No orders yet</p></div>';
@@ -652,55 +1124,275 @@ async function loadOrders() {
 
 
 function renderOrderCard(order) {
-    const statusClass = `status-${order.status || "pending"}`;
+    const status = (order.status || "pending").toLowerCase();
+    const statusClass = `status-${status}`;
+
+    // Format created_at date
+    let dateStr = order.created_at || '';
+    try {
+        if (dateStr) {
+            const date = new Date(dateStr);
+            dateStr = date.toLocaleString();
+        }
+    } catch (e) {
+        // Keep original string if parsing fails
+    }
+
     return `
-        <div class="order-card">
+        <div class="order-card clickable" data-order-id="${order.order_id}" onclick="trackOrder('${order.order_id}')">
             <div class="order-header">
                 <div>
                     <strong>Order #${(order.order_id || "").substring(0, 8)}</strong>
-                    <div style="color: var(--text-light); font-size: 0.85rem">${order.created_at || ''}</div>
+                    <div style="color: var(--text-light); font-size: 0.85rem">${dateStr}</div>
                 </div>
                 <span class="order-status ${statusClass}">${(order.status || "pending").toUpperCase()}</span>
             </div>
-            <div>
+            <div style="margin: 0.75rem 0;">
                 ${(order.items || []).map((i) => `<span>${i.name} x${i.quantity}</span>`).join(", ")}
             </div>
-            <div style="display: flex; justify-content: space-between; margin-top: 0.75rem">
-                <strong>$${parseFloat(order.total || 0).toFixed(2)}</strong>
-                ${order.status === "delivering" ? `<button class="btn btn-primary btn-small" onclick="trackOrder('${order.order_id}')">Track</button>` : ""}
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <strong style="font-size: 1.1rem;">$${parseFloat(order.total || 0).toFixed(2)}</strong>
+                <span style="color: var(--text-light); font-size: 0.85rem;">Click to track →</span>
             </div>
         </div>
     `;
 }
 
 
-function trackOrder(orderId) {
+async function trackOrder(orderId) {
     showPage("tracking");
     const info = document.getElementById("tracking-info");
     const timeline = document.getElementById("tracking-status");
 
-    info.innerHTML = `<h3>Order #${orderId.substring(0, 8)}</h3>`;
+    // Clean up previous map
+    if (trackingMap) {
+        trackingMap.remove();
+        trackingMap = null;
+        driverMarker = null;
+        restaurantMarker = null;
+        destinationMarker = null;
+        routeLine = null;
+        currentOrderData = null;
+    }
+    document.getElementById("tracking-map").style.display = "none";
+    const mapLegend = document.getElementById("map-legend");
+    if (mapLegend) mapLegend.style.display = "none";
 
+    // Show loading state
+    info.innerHTML = '<div style="padding: 2rem; text-align: center;">Loading order details...</div>';
+    timeline.innerHTML = '';
+
+    // Fetch order details from API
+    try {
+        const data = await apiCall(`/orders/${orderId}`);
+        const order = data.order;
+
+        console.log("Order data:", order); // Debug
+
+        // Calculate total from items
+        const total = (order.items || []).reduce((sum, item) =>
+            sum + (parseFloat(item.unit_price_cents || 0) / 100) * (item.quantity || 0), 0);
+
+        // Format date
+        let dateStr = order.created_at || '';
+        try {
+            if (dateStr) {
+                const date = new Date(dateStr);
+                dateStr = date.toLocaleString();
+            }
+        } catch (e) {
+            // Keep original string if parsing fails
+        }
+
+        const status = (order.status || "pending").toLowerCase();
+        const statusClass = `status-${status}`;
+
+        // Render detailed order info
+        info.innerHTML = `
+            <h2 style="margin-bottom: 1.5rem;">Order Details</h2>
+            <div style="background: var(--white); padding: 2rem; border-radius: var(--radius); box-shadow: var(--shadow); margin-bottom: 2rem;">
+                <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 1.5rem; padding-bottom: 1rem; border-bottom: 2px solid var(--border);">
+                    <div>
+                        <h3 style="margin: 0; font-size: 1.5rem;">Order #${orderId.substring(0, 8)}</h3>
+                        <p style="color: var(--text-light); font-size: 0.9rem; margin: 0.5rem 0 0 0;">
+                            <strong>Placed:</strong> ${dateStr}
+                        </p>
+                        ${order.restaurant_id ? `
+                            <p style="color: var(--text-light); font-size: 0.9rem; margin: 0.25rem 0 0 0;">
+                                <strong>Restaurant ID:</strong> ${order.restaurant_id.substring(0, 8)}
+                            </p>
+                        ` : ''}
+                    </div>
+                    <span class="order-status ${statusClass}" style="font-size: 1rem; padding: 0.5rem 1rem;">
+                        ${(order.status || "pending").toUpperCase()}
+                    </span>
+                </div>
+
+                <div style="margin-bottom: 1.5rem;">
+                    <h4 style="margin-bottom: 1rem; font-size: 1.1rem; color: var(--text);">Order Items</h4>
+                    ${(order.items || []).map(item => `
+                        <div style="display: flex; justify-content: space-between; align-items: center; padding: 0.75rem; background: var(--bg); border-radius: 6px; margin-bottom: 0.5rem;">
+                            <div>
+                                <strong>${item.name}</strong>
+                                <span style="color: var(--text-light); margin-left: 0.5rem;">x${item.quantity}</span>
+                            </div>
+                            <span style="font-weight: 600;">$${((item.unit_price_cents || 0) / 100 * item.quantity).toFixed(2)}</span>
+                        </div>
+                    `).join('')}
+                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 1rem 0.75rem; margin-top: 1rem; border-top: 2px solid var(--border); font-size: 1.2rem;">
+                        <strong>Total:</strong>
+                        <strong style="color: var(--primary);">$${parseFloat(order.total || total).toFixed(2)}</strong>
+                    </div>
+                </div>
+
+                ${getStatusBasedInfo(order)}
+            </div>
+        `;
+
+        // Render timeline based on current status
+        updateTrackingTimeline(orderId, order.status);
+
+        // Initialize map for all orders (not just with delivery_id)
+        // This shows restaurant and destination even before driver is assigned
+        const mapData = {
+            restaurant_location: order.restaurant_location || "37.7749,-122.4194", // SF default
+            delivery_address: order.delivery_address || "37.7849,-122.4094", // SF default
+            driver_location: null,
+            status: order.status
+        };
+        initializeTrackingMap(mapData);
+
+        // Subscribe to WebSocket updates for this order
+        if (order.delivery_id) {
+            // Use the short form of delivery_id (first 8 chars) to match simulator format
+            const deliveryId = order.delivery_id.substring(0, 8);
+            console.log(`Auto-subscribing to delivery: ${deliveryId} (full: ${order.delivery_id})`);
+            subscribeToDelivery(deliveryId);
+        } else {
+            console.log("Order doesn't have delivery_id yet - map shows restaurant and destination");
+        }
+    } catch (err) {
+        console.error("Failed to load order:", err);
+        info.innerHTML = `
+            <div style="background: var(--white); padding: 2rem; border-radius: var(--radius); text-align: center;">
+                <p style="color: var(--primary); margin-bottom: 1rem;">❌ Failed to load order details</p>
+                <p style="color: var(--text-light); font-size: 0.9rem;">${err.message || 'Unknown error'}</p>
+                <button class="btn btn-primary" onclick="showPage('orders')" style="margin-top: 1rem;">Back to Orders</button>
+            </div>
+        `;
+        timeline.innerHTML = '';
+    }
+}
+
+function subscribeToDelivery(deliveryId) {
+    // If WebSocket isn't connected, connect it first
+    if (!wsConnection || wsConnection.readyState !== WebSocket.OPEN) {
+        console.log("WebSocket not connected, connecting now...");
+
+        // Connect WebSocket if we have auth token
+        if (authToken) {
+            connectWebSocket();
+
+            // Wait for connection to establish, then subscribe
+            const checkConnection = setInterval(() => {
+                if (wsConnection && wsConnection.readyState === WebSocket.OPEN) {
+                    clearInterval(checkConnection);
+                    sendWebSocketMessage("subscribe", { delivery_id: deliveryId });
+                    console.log(`Subscribed to delivery ${deliveryId}`);
+                    showToast("Connected to real-time tracking", "success");
+                }
+            }, 100);
+
+            // Stop checking after 5 seconds
+            setTimeout(() => clearInterval(checkConnection), 5000);
+        } else {
+            console.error("Cannot subscribe: No auth token");
+            showToast("Real-time tracking unavailable - please login", "error");
+        }
+        return;
+    }
+
+    sendWebSocketMessage("subscribe", { delivery_id: deliveryId });
+    console.log(`Subscribed to delivery ${deliveryId}`);
+}
+
+function updateTrackingTimeline(orderId, status) {
+    const timeline = document.getElementById("tracking-status");
+    if (!timeline) return;
+
+    // Normalize status to uppercase
+    const normalizedStatus = (status || "").toUpperCase();
+
+    // Map status to timeline steps with descriptions
     const steps = [
-        { label: "Order Placed", status: "completed" },
-        { label: "Restaurant Confirmed", status: "completed" },
-        { label: "Preparing Food", status: "completed" },
-        { label: "Driver Picked Up", status: "active" },
-        { label: "On the Way", status: "" },
-        { label: "Delivered", status: "" },
+        {
+            key: "PLACED",
+            label: "Order Placed",
+            description: "Your order has been received",
+            icon: "📋"
+        },
+        {
+            key: "CONFIRMED",
+            label: "Restaurant Confirmed",
+            description: "Restaurant accepted your order",
+            icon: "✅"
+        },
+        {
+            key: "PREPARING",
+            label: "Preparing Food",
+            description: "Your food is being prepared",
+            icon: "👨‍🍳"
+        },
+        {
+            key: "DELIVERING",
+            label: "Out for Delivery",
+            description: "Driver is on the way",
+            icon: "🚗"
+        },
+        {
+            key: "COMPLETED",
+            label: "Delivered",
+            description: "Enjoy your meal!",
+            icon: "🎉"
+        },
     ];
 
-    timeline.innerHTML = steps
-        .map(
-            (s) => `
-        <div class="tracking-step ${s.status}">
-            <strong>${s.label}</strong>
-        </div>
-    `
-        )
-        .join("");
+    // Determine which step is active based on status
+    let activeStepIndex = -1;
+    if (normalizedStatus === "PENDING" || normalizedStatus === "PLACED") {
+        activeStepIndex = 0;
+    } else if (normalizedStatus === "CONFIRMED") {
+        activeStepIndex = 1;
+    } else if (normalizedStatus === "PREPARING") {
+        activeStepIndex = 2;
+    } else if (normalizedStatus === "DELIVERING") {
+        activeStepIndex = 3;
+    } else if (normalizedStatus === "COMPLETED" || normalizedStatus === "DELIVERED") {
+        activeStepIndex = 4;
+    }
 
-    // TODO: connect WebSocket for real-time updates
+    timeline.innerHTML = `
+        <h3 style="margin-bottom: 1.5rem;">Order Progress</h3>
+        ${steps
+            .map((s, idx) => {
+                let stepClass = "";
+                if (idx < activeStepIndex) stepClass = "completed";
+                else if (idx === activeStepIndex) stepClass = "active";
+
+                return `
+                <div class="tracking-step ${stepClass}">
+                    <div style="display: flex; align-items: flex-start;">
+                        <span style="font-size: 1.5rem; margin-right: 0.75rem;">${s.icon}</span>
+                        <div>
+                            <strong style="display: block; margin-bottom: 0.25rem;">${s.label}</strong>
+                            <span style="color: var(--text-light); font-size: 0.85rem;">${s.description}</span>
+                        </div>
+                    </div>
+                </div>
+            `;
+            })
+            .join("")}
+    `;
 }
 
 

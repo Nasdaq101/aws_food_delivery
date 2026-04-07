@@ -327,6 +327,16 @@ body {
     padding: 1.25rem;
     margin-bottom: 1rem;
     box-shadow: var(--shadow);
+    transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.order-card.clickable {
+    cursor: pointer;
+}
+
+.order-card.clickable:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
 }
 
 .order-header {
@@ -343,42 +353,99 @@ body {
 }
 
 .status-pending { background: #fff3cd; color: #856404; }
+.status-placed { background: #fff3cd; color: #856404; }
 .status-confirmed { background: #d1ecf1; color: #0c5460; }
 .status-preparing { background: #d4edda; color: #155724; }
 .status-delivering { background: #cce5ff; color: #004085; }
 .status-delivered { background: #d4edda; color: var(--success); }
+.status-completed { background: #d4edda; color: var(--success); }
 .status-cancelled { background: #f8d7da; color: #721c24; }
 
 .tracking-timeline {
     margin-top: 2rem;
-    padding-left: 2rem;
-    border-left: 3px solid var(--border);
+    padding: 1.5rem;
+    background: var(--white);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
 }
 
 .tracking-step {
     position: relative;
     padding-bottom: 2rem;
-    padding-left: 1.5rem;
+    padding-left: 2.5rem;
+    border-left: 3px solid var(--border);
+    margin-left: 1rem;
+    transition: all 0.3s ease;
+}
+
+.tracking-step:last-child {
+    padding-bottom: 0;
+    border-left: none;
 }
 
 .tracking-step::before {
     content: "";
     position: absolute;
-    left: -2.45rem;
-    top: 0;
-    width: 14px;
-    height: 14px;
+    left: -0.65rem;
+    top: 0.3rem;
+    width: 16px;
+    height: 16px;
     border-radius: 50%;
     background: var(--border);
-    border: 2px solid var(--white);
+    border: 3px solid var(--white);
+    box-shadow: 0 0 0 2px var(--border);
+    transition: all 0.3s ease;
 }
 
 .tracking-step.active::before {
     background: var(--primary);
+    box-shadow: 0 0 0 2px var(--primary);
+    animation: pulse 2s infinite;
 }
 
 .tracking-step.completed::before {
     background: var(--success);
+    box-shadow: 0 0 0 2px var(--success);
+}
+
+.tracking-step.active {
+    border-left-color: var(--primary);
+}
+
+.tracking-step.completed {
+    border-left-color: var(--success);
+}
+
+@keyframes pulse {
+    0%, 100% {
+        transform: scale(1);
+        opacity: 1;
+    }
+    50% {
+        transform: scale(1.1);
+        opacity: 0.8;
+    }
+}
+
+/* Map marker pulse animation */
+.driver-marker div {
+    animation: pulse 2s infinite;
+}
+
+/* Map container styling */
+#tracking-map {
+    position: relative;
+}
+
+/* Leaflet popup styling */
+.leaflet-popup-content-wrapper {
+    border-radius: 8px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
+}
+
+.leaflet-popup-content {
+    margin: 12px;
+    font-size: 14px;
 }
 
 .auth-form {

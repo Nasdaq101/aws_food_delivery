@@ -7,6 +7,8 @@ from stacks.messaging_stack import MessagingStack
 from stacks.api_stack import ApiStack
 from stacks.compute_stack import ComputeStack
 from stacks.stepfunctions_stack import StepFunctionsStack
+from stacks.integration_stack import IntegrationStack
+from stacks.websocket_stack import WebSocketStack
 
 app = cdk.App()
 
@@ -36,11 +38,25 @@ stepfunctions_stack = StepFunctionsStack(
     env=env,
 )
 
+websocket_stack = WebSocketStack(
+    app, "FoodDelivery-WebSocket",
+    database_stack=database_stack,
+    auth_stack=auth_stack,
+    env=env,
+)
+
 api_stack = ApiStack(
     app, "FoodDelivery-Api",
     compute_stack=compute_stack,
     auth_stack=auth_stack,
     storage_stack=storage_stack,
+    env=env,
+)
+
+integration_stack = IntegrationStack(
+    app, "FoodDelivery-Integration",
+    compute_stack=compute_stack,
+    messaging_stack=messaging_stack,
     env=env,
 )
 

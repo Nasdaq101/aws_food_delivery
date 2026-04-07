@@ -151,3 +151,10 @@ class DatabaseStack(Stack):
             billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
             removal_policy=RemovalPolicy.DESTROY,
         )
+
+        # Add GSI for efficient lookup of connections by delivery_id (for broadcasting)
+        self.tracking_connections_table.add_global_secondary_index(
+            index_name="delivery-connections-index",
+            partition_key=dynamodb.Attribute(name="subscribed_delivery_id", type=dynamodb.AttributeType.STRING),
+            projection_type=dynamodb.ProjectionType.KEYS_ONLY,  # Only need connection_id
+        )

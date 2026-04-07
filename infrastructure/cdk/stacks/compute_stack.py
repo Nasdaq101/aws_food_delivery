@@ -20,10 +20,10 @@ SERVICES = [
     "notification-service",
     "rating-service",
     "promotion-service",
-    "tracking-service",
     "analytics-service",
     "geolocation-service",
     "admin-service",
+    "websocket-broadcaster",
 ]
 
 
@@ -74,17 +74,17 @@ class ComputeStack(Stack):
         # DynamoDB access
         table_service_map = {
             "users_table": ["user-service", "auth-service", "admin-service", "order-service"],
-            "restaurants_table": ["restaurant-service", "search-service", "admin-service"],
+            "restaurants_table": ["restaurant-service", "search-service", "admin-service", "order-service"],
             "menus_table": ["menu-service", "search-service"],
-            "orders_table": ["order-service", "admin-service", "analytics-service"],
+            "orders_table": ["order-service", "admin-service", "analytics-service", "websocket-broadcaster"],
             "carts_table": ["cart-service", "order-service"],
             "drivers_table": ["driver-service", "delivery-service"],
-            "deliveries_table": ["delivery-service", "tracking-service"],
+            "deliveries_table": ["delivery-service", "websocket-broadcaster"],
             "ratings_table": ["rating-service"],
             "promotions_table": ["promotion-service", "order-service"],
             "payments_table": ["payment-service"],
             "analytics_table": ["analytics-service"],
-            "tracking_connections_table": ["tracking-service"],
+            "tracking_connections_table": ["websocket-broadcaster"],
         }
 
         for table_attr, svc_list in table_service_map.items():
@@ -131,5 +131,25 @@ class ComputeStack(Stack):
                 effect=iam.Effect.ALLOW,
                 actions=["ssm:GetParameter", "ssm:GetParameters"],
                 resources=[f"arn:aws:ssm:{self.region}:{self.account}:parameter/fooddelivery/*"],
+            )
+        )
+
+        # ── API Gateway Management API Permissions for websocket-broadcaster ──
+        # Allow websocket-broadcaster to send messages to WebSocket connections
+        # Note: The specific API Gateway ARN will be configured in the WebSocket stack
+        self.functions["websocket-broadcaster"].add_to_role_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["execute-api:ManageConnections"],
+                resources=[f"arn:aws:execute-api:{self.region}:{self.account}:*"],
+            )
+        )
+
+        # Allow websocket-broadcaster to discover WebSocket API v2 endpoints
+        self.functions["websocket-broadcaster"].add_to_role_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=["apigateway:GET"],
+                resources=[f"arn:aws:apigateway:{self.region}::/apis"],
             )
         )

@@ -173,6 +173,20 @@ class StepFunctionsStack(Stack):
             result_path="$.delivery_assignment",
         )
 
+        # ── Step 5b: Update Order with Delivery ID ──
+        update_order_with_delivery = tasks.LambdaInvoke(
+            self,
+            "UpdateOrderWithDeliveryID",
+            lambda_function=compute_stack.functions["order-service"],
+            payload=sfn.TaskInput.from_object({
+                "action": "update_status",
+                "order_id.$": "$.order_id",
+                "status": "DELIVERING",
+                "delivery_id.$": "$.delivery_assignment.Output.delivery.Payload.delivery_id",
+            }),
+            result_path="$.delivery_update",
+        )
+
         # ── Step 6: Send Customer Notification ──
         send_customer_notification = tasks.SnsPublish(
             self,
@@ -296,7 +310,7 @@ class StepFunctionsStack(Stack):
             )
         )
 
-        process_payment.next(notify_restaurant).next(update_order_confirmed).next(start_delivery).next(send_customer_notification).next(order_success)
+        process_payment.next(notify_restaurant).next(update_order_confirmed).next(start_delivery).next(update_order_with_delivery).next(send_customer_notification).next(order_success)
 
         # Add error handling to critical steps
         process_payment.add_catch(error_handler, errors=["States.ALL"], result_path="$.error")

@@ -4,6 +4,9 @@ import re
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
+from urllib.parse import quote
+from urllib.request import Request, urlopen
+import time
 
 import boto3
 from botocore.exceptions import ClientError
@@ -20,6 +23,7 @@ ssm = boto3.client("ssm")
 ORDERS_TABLE = os.environ.get("ORDERS_TABLE_NAME", "FoodDelivery-Orders")
 CARTS_TABLE = os.environ.get("CARTS_TABLE_NAME", "FoodDelivery-Carts")
 USERS_TABLE = os.environ.get("USERS_TABLE_NAME", "FoodDelivery-Users")
+RESTAURANTS_TABLE = os.environ.get("RESTAURANTS_TABLE_NAME", "FoodDelivery-Restaurants")
 EVENT_BUS_NAME = os.environ.get("EVENT_BUS_NAME", "FoodDeliveryEventBus")
 ORDER_QUEUE_URL = os.environ.get("ORDER_QUEUE_URL", "")
 ORDER_WORKFLOW_PARAM = "/fooddelivery/stepfunctions/order-workflow-arn"
@@ -30,6 +34,7 @@ _order_workflow_arn = None
 orders_table = dynamodb.Table(ORDERS_TABLE)
 carts_table = dynamodb.Table(CARTS_TABLE)
 users_table = dynamodb.Table(USERS_TABLE)
+restaurants_table = dynamodb.Table(RESTAURANTS_TABLE)
 
 
 def response(status_code, body):
@@ -72,6 +77,129 @@ def _get_user_role(user_id: str):
         return user.get("role", "customer")  # Default to customer if role not set
     except ClientError as e:
         print(f"Failed to get user role: {e}")
+        return None
+
+
+def _geocode_address(address: str):
+    """
+    Convert address to lat,lng coordinates using OpenStreetMap Nominatim.
+    Returns: "lat,lng" string or None if geocoding fails
+    """
+    if not address or address.strip() == "":
+        return None
+
+    try:
+        # Use Nominatim API (free, no API key needed)
+        # Nominatim usage policy: max 1 request/second
+        time.sleep(1)  # Rate limiting
+
+        encoded_address = quote(address)
+        url = f"https://nominatim.openstreetmap.org/search?q={encoded_address}&format=json&limit=1"
+
+        # Add User-Agent header (required by Nominatim)
+        req = Request(url, headers={'User-Agent': 'FoodDeliveryApp/1.0'})
+
+        with urlopen(req, timeout=5) as response:
+            data = json.loads(response.read().decode())
+
+            if data and len(data) > 0:
+                lat = data[0].get('lat')
+                lng = data[0].get('lon')
+                if lat and lng:
+                    coords = f"{lat},{lng}"
+                    print(f"Geocoded '{address}' -> {coords}")
+                    return coords
+
+        print(f"Could not geocode address: {address}")
+        return None
+
+    except Exception as e:
+        print(f"Geocoding error for '{address}': {e}")
+        return None
+
+
+def _get_restaurant_location(restaurant_id: str):
+    """Get restaurant's location coordinates from restaurants table, geocoding address if needed"""
+    try:
+        res = restaurants_table.get_item(Key={"restaurant_id": restaurant_id})
+        restaurant = res.get("Item")
+        if not restaurant:
+            print(f"Restaurant {restaurant_id} not found")
+            return None
+
+        # Check if location coordinates already exist
+        location = restaurant.get("location")
+        if location:
+            print(f"Found cached restaurant location: {location}")
+            return location
+
+        # Try to geocode the address
+        address = restaurant.get("address")
+        if address:
+            print(f"Geocoding restaurant address: {address}")
+            location = _geocode_address(address)
+
+            # Cache the geocoded location in the database for future use
+            if location:
+                try:
+                    restaurants_table.update_item(
+                        Key={"restaurant_id": restaurant_id},
+                        UpdateExpression="SET #loc = :loc",
+                        ExpressionAttributeNames={"#loc": "location"},
+                        ExpressionAttributeValues={":loc": location}
+                    )
+                    print(f"Cached geocoded location for restaurant {restaurant_id}")
+                except Exception as e:
+                    print(f"Failed to cache location: {e}")
+
+            return location
+
+        print(f"Restaurant {restaurant_id} has no address or location data")
+        return None
+    except ClientError as e:
+        print(f"Failed to get restaurant location: {e}")
+        return None
+
+
+def _get_user_address(user_id: str):
+    """Get user's delivery address coordinates, geocoding if needed"""
+    try:
+        res = users_table.get_item(Key={"user_id": user_id})
+        user = res.get("Item")
+        if not user:
+            return None
+
+        # Check if user has pre-stored location coordinates
+        location = user.get("location")
+        if location:
+            print(f"Found cached user location: {location}")
+            return location
+
+        # Try to geocode the address
+        address = user.get("address")
+        if address:
+            print(f"Geocoding user address: {address}")
+            location = _geocode_address(address)
+
+            # Cache the geocoded location (optional - user locations change more frequently)
+            if location:
+                try:
+                    users_table.update_item(
+                        Key={"user_id": user_id},
+                        UpdateExpression="SET #loc = :loc",
+                        ExpressionAttributeNames={"#loc": "location"},
+                        ExpressionAttributeValues={":loc": location}
+                    )
+                    print(f"Cached geocoded location for user {user_id}")
+                except Exception as e:
+                    print(f"Failed to cache user location: {e}")
+
+            return location
+
+        print(f"User {user_id} has no address data")
+        return None
+    except ClientError as e:
+        print(f"Failed to get user address: {e}")
         return None
 
 
@@ -145,6 +273,37 @@ def handle_create_order(user_id: str, body: dict):
     total_amount = sum(item.get("quantity", 0) * item.get("unit_price_cents", 0) for item in lines) / 100
     total_amount_decimal = Decimal(str(total_amount))
 
+    # Get restaurant location (will geocode if needed)
+    restaurant_location = _get_restaurant_location(restaurant_id)
+
+    # Get delivery address - try from request body first, then user profile
+    delivery_address_input = body.get("delivery_address")
+    if delivery_address_input:
+        # Check if it's already coordinates (format: "lat,lng")
+        if ',' in delivery_address_input and len(delivery_address_input.split(',')) == 2:
+            try:
+                parts = delivery_address_input.split(',')
+                float(parts[0].strip())
+                float(parts[1].strip())
+                delivery_address = delivery_address_input  # Already coordinates
+                print(f"Using provided coordinates: {delivery_address}")
+            except ValueError:
+                # Not coordinates, geocode it
+                print(f"Geocoding provided address: {delivery_address_input}")
+                delivery_address = _geocode_address(delivery_address_input)
+        else:
+            # Plain text address, geocode it
+            print(f"Geocoding provided address: {delivery_address_input}")
+            delivery_address = _geocode_address(delivery_address_input)
+    else:
+        # Use user's default address from profile
+        delivery_address = _get_user_address(user_id)
+
+    # If still no delivery address, use a default SF location
+    if not delivery_address:
+        delivery_address = "37.7749,-122.4194"  # Default SF coordinates
+        print("Warning: No delivery address found, using default")
+
     order = {
         "order_id": order_id,
         "user_id": user_id,
@@ -156,7 +315,15 @@ def handle_create_order(user_id: str, body: dict):
         "updated_at": created_at,
         "notes": body.get("notes") or "",
     }
+
+    # Add location data if available
+    if restaurant_location:
+        order["restaurant_location"] = restaurant_location
+    if delivery_address:
+        order["delivery_address"] = delivery_address
+
     print(f"Creating order: {order_id} for ${total_amount}")
+    print(f"Restaurant location: {restaurant_location}, Delivery address: {delivery_address}")
     orders_table.put_item(Item=order)
     carts_table.put_item(Item={"user_id": user_id, "items": []})
     print("Order saved to DynamoDB")
@@ -300,7 +467,7 @@ def handle_validate_order(order_id: str):
     }
 
 
-def handle_update_order_status(order_id: str, status: str, error: str = None):
+def handle_update_order_status(order_id: str, status: str, error: str = None, delivery_id: str = None):
     """Called by Step Functions to update order status"""
     try:
         update_expr = "SET #s = :st, #u = :u"
@@ -311,6 +478,11 @@ def handle_update_order_status(order_id: str, status: str, error: str = None):
             update_expr += ", #e = :e"
             expr_names["#e"] = "error_message"
             expr_values[":e"] = error
+
+        if delivery_id:
+            update_expr += ", #d = :did"
+            expr_names["#d"] = "delivery_id"
+            expr_values[":did"] = delivery_id
 
         out = orders_table.update_item(
             Key={"order_id": order_id},
@@ -338,7 +510,8 @@ def lambda_handler(event, context):
                 return handle_update_order_status(
                     event.get("order_id"),
                     event.get("status"),
-                    event.get("error")
+                    event.get("error"),
+                    event.get("delivery_id")
                 )
 
         # Otherwise, it's an HTTP API call
