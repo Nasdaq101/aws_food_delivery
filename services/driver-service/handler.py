@@ -119,11 +119,42 @@ def _update_driver(driver_id, event):
     data = _parse_body(event)
     if not data:
         return response(400, {"error": "JSON body required"})
+
+    # Check if driver exists first
+    try:
+        res = table.get_item(Key={"driver_id": driver_id})
+        driver_exists = "Item" in res
+    except Exception as e:
+        return response(500, {"error": f"Failed to check driver existence: {str(e)}"})
+
+    # If driver doesn't exist, create it (upsert pattern)
+    if not driver_exists:
+        now = _utc_now_iso()
+        item = {
+            "driver_id": driver_id,
+            "name": data.get("name", ""),
+            "phone": data.get("phone", ""),
+            "status": data.get("status", "available"),
+            "location": data.get("location") or {},
+            "vehicle_type": data.get("vehicle_type", ""),
+            "license_plate": data.get("license_plate", ""),
+            "license_number": data.get("license_number", ""),
+            "created_at": now,
+            "updated_at": now,
+        }
+        try:
+            table.put_item(Item=item)
+            return response(200, item)
+        except Exception as e:
+            return response(500, {"error": f"Failed to create driver: {str(e)}"})
+
+    # Driver exists, update it
     expr_parts = []
     names = {}
     values = {}
     idx = 0
-    for key in ("status", "location", "name", "phone"):
+    # Extended list of allowed fields for drivers
+    for key in ("status", "location", "name", "phone", "vehicle_type", "license_plate", "license_number"):
         if key not in data:
             continue
         nk = f"#k{idx}"
@@ -133,7 +164,7 @@ def _update_driver(driver_id, event):
         expr_parts.append(f"{nk} = {vk}")
         idx += 1
     if not expr_parts:
-        return response(400, {"error": "No updatable fields (status, location, name, phone)"})
+        return response(400, {"error": "No updatable fields provided"})
     names["#ua"] = "updated_at"
     values[":ua"] = _utc_now_iso()
     expr_parts.append("#ua = :ua")
@@ -143,13 +174,10 @@ def _update_driver(driver_id, event):
             UpdateExpression="SET " + ", ".join(expr_parts),
             ExpressionAttributeNames=names,
             ExpressionAttributeValues=values,
-            ConditionExpression="attribute_exists(driver_id)",
             ReturnValues="ALL_NEW",
         )
         res = table.get_item(Key={"driver_id": driver_id})
         return response(200, res.get("Item", {}))
-    except table.meta.client.exceptions.ConditionalCheckFailedException:
-        return response(404, {"error": "Driver not found"})
     except Exception as e:
         return response(500, {"error": str(e)})
 
@@ -158,7 +186,34 @@ def _find_available_drivers(event):
     """Called by Step Functions to find available drivers near a location"""
     restaurant_location = event.get("restaurant_location") or {}
 
+    # Check for preferred driver (for testing/development)
+    preferred_driver_id = os.environ.get("PREFERRED_DRIVER_ID")
+
     try:
+        # If a preferred driver is set, try to find them first
+        if preferred_driver_id:
+            try:
+                driver_result = table.get_item(Key={"driver_id": preferred_driver_id})
+                preferred_driver = driver_result.get("Item")
+
+                if preferred_driver and preferred_driver.get("status") == "available":
+                    print(f"Using preferred driver: {preferred_driver_id}")
+                    return {
+                        "available": True,
+                        "driver_count": 1,
+                        "drivers": [preferred_driver],
+                        "best_driver": {
+                            "driver_id": preferred_driver.get("driver_id"),
+                            "name": preferred_driver.get("name"),
+                            "vehicle_type": preferred_driver.get("vehicle_type", ""),
+                            "rating": float(preferred_driver.get("rating", 4.5)),
+                            "eta": 15
+                        }
+                    }
+            except Exception as e:
+                print(f"Error fetching preferred driver: {str(e)}")
+                # Fall through to normal driver search
+
         # Scan for available drivers
         scan_result = table.scan(
             FilterExpression="#s = :status",
@@ -192,8 +247,8 @@ def _find_available_drivers(event):
             "best_driver": {
                 "driver_id": best_driver.get("driver_id"),
                 "name": best_driver.get("name"),
-                "vehicle_type": best_driver.get("vehicle_type"),
-                "rating": float(best_driver.get("rating", 0)),
+                "vehicle_type": best_driver.get("vehicle_type", ""),
+                "rating": float(best_driver.get("rating", 4.5)),
                 "eta": 15  # Estimated time in minutes (placeholder)
             }
         }

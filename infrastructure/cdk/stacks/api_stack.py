@@ -102,6 +102,20 @@ class ApiStack(Stack):
         delivery_by_id = deliveries.add_resource("{delivery_id}")
         delivery_by_id.add_method("GET", apigw.LambdaIntegration(fns["delivery-service"]), authorizer=authorizer, authorization_type=apigw.AuthorizationType.COGNITO)
 
+        # /deliveries/{delivery_id}/pickup
+        pickup = delivery_by_id.add_resource("pickup")
+        pickup.add_method("PATCH", apigw.LambdaIntegration(fns["delivery-service"]), authorizer=authorizer, authorization_type=apigw.AuthorizationType.COGNITO)
+
+        # /deliveries/{delivery_id}/complete
+        complete = delivery_by_id.add_resource("complete")
+        complete.add_method("PATCH", apigw.LambdaIntegration(fns["delivery-service"]), authorizer=authorizer, authorization_type=apigw.AuthorizationType.COGNITO)
+
+        # /deliveries/offers/{offer_id}/respond
+        offers = deliveries.add_resource("offers")
+        offer_by_id = offers.add_resource("{offer_id}")
+        respond = offer_by_id.add_resource("respond")
+        respond.add_method("POST", apigw.LambdaIntegration(fns["delivery-service"]), authorizer=authorizer, authorization_type=apigw.AuthorizationType.COGNITO)
+
         # /drivers
         drivers = self.api.root.add_resource("drivers")
         drivers.add_method("POST", apigw.LambdaIntegration(fns["driver-service"]), authorizer=authorizer, authorization_type=apigw.AuthorizationType.COGNITO)

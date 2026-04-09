@@ -76,10 +76,11 @@ class ComputeStack(Stack):
             "users_table": ["user-service", "auth-service", "admin-service", "order-service"],
             "restaurants_table": ["restaurant-service", "search-service", "admin-service", "order-service"],
             "menus_table": ["menu-service", "search-service"],
-            "orders_table": ["order-service", "admin-service", "analytics-service", "websocket-broadcaster"],
+            "orders_table": ["order-service", "admin-service", "analytics-service", "websocket-broadcaster", "delivery-service"],
             "carts_table": ["cart-service", "order-service"],
             "drivers_table": ["driver-service", "delivery-service"],
-            "deliveries_table": ["delivery-service", "websocket-broadcaster"],
+            "deliveries_table": ["delivery-service", "websocket-broadcaster", "order-service"],
+            "driver_offers_table": ["delivery-service", "order-service"],
             "ratings_table": ["rating-service"],
             "promotions_table": ["promotion-service", "order-service"],
             "payments_table": ["payment-service"],
@@ -131,6 +132,19 @@ class ComputeStack(Stack):
                 effect=iam.Effect.ALLOW,
                 actions=["ssm:GetParameter", "ssm:GetParameters"],
                 resources=[f"arn:aws:ssm:{self.region}:{self.account}:parameter/fooddelivery/*"],
+            )
+        )
+
+        # ── Step Functions Callback Permissions for delivery-service ──
+        # Allow delivery-service to send task success/failure for driver acceptance
+        self.functions["delivery-service"].add_to_role_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=[
+                    "states:SendTaskSuccess",
+                    "states:SendTaskFailure",
+                ],
+                resources=["*"],
             )
         )
 

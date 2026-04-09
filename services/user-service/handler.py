@@ -52,7 +52,7 @@ def handle_put_user(target_id: str, requester_sub: str, body: dict):
     if not requester_sub or requester_sub != target_id:
         return response(403, {"error": "Forbidden", "message": "Cannot update another user's profile"})
     # TODO: validate schema (email format, allowed fields, etc.)
-    allowed = {"email", "full_name", "phone", "address", "preferences", "role"}
+    allowed = {"email", "full_name", "phone", "address", "preferences", "role", "location"}
     updates = {k: v for k, v in body.items() if k in allowed}
     if not updates:
         return response(400, {"error": "BadRequest", "message": "No valid fields to update"})

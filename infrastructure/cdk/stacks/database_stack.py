@@ -101,6 +101,21 @@ class DatabaseStack(Stack):
             partition_key=dynamodb.Attribute(name="order_id", type=dynamodb.AttributeType.STRING),
         )
 
+        # ── Driver Offers Table ──
+        self.driver_offers_table = dynamodb.Table(
+            self, "DriverOffersTable",
+            table_name="FoodDelivery-DriverOffers",
+            partition_key=dynamodb.Attribute(name="offer_id", type=dynamodb.AttributeType.STRING),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=RemovalPolicy.DESTROY,
+            time_to_live_attribute="ttl",
+        )
+        self.driver_offers_table.add_global_secondary_index(
+            index_name="delivery-offers-index",
+            partition_key=dynamodb.Attribute(name="delivery_id", type=dynamodb.AttributeType.STRING),
+            sort_key=dynamodb.Attribute(name="created_at", type=dynamodb.AttributeType.STRING),
+        )
+
         # ── Ratings Table ──
         self.ratings_table = dynamodb.Table(
             self, "RatingsTable",

@@ -49,3 +49,36 @@ class IntegrationStack(Stack):
             ),
             targets=[targets.LambdaFunction(broadcaster_lambda)],
         )
+
+        # Rule 3: DriverOfferCreated → WebSocket broadcaster
+        events.Rule(
+            self,
+            "DriverOfferCreatedRule",
+            event_bus=messaging_stack.event_bus,
+            event_pattern=events.EventPattern(
+                source=["fooddelivery.delivery"], detail_type=["DriverOfferCreated"]
+            ),
+            targets=[targets.LambdaFunction(broadcaster_lambda)],
+        )
+
+        # Rule 4: DeliveryPickedUp → WebSocket broadcaster
+        events.Rule(
+            self,
+            "DeliveryPickedUpRule",
+            event_bus=messaging_stack.event_bus,
+            event_pattern=events.EventPattern(
+                source=["fooddelivery.delivery"], detail_type=["DeliveryPickedUp"]
+            ),
+            targets=[targets.LambdaFunction(broadcaster_lambda)],
+        )
+
+        # Rule 5: DeliveryCompleted → WebSocket broadcaster
+        events.Rule(
+            self,
+            "DeliveryCompletedRule",
+            event_bus=messaging_stack.event_bus,
+            event_pattern=events.EventPattern(
+                source=["fooddelivery.delivery"], detail_type=["DeliveryCompleted"]
+            ),
+            targets=[targets.LambdaFunction(broadcaster_lambda)],
+        )

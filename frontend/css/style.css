@@ -15,6 +15,7 @@
     --border: #dee2e6;
     --success: #2d6a4f;
     --warning: #e9c46a;
+    --warning-bg: #fff3cd;
     --radius: 8px;
     --shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
 }
@@ -356,6 +357,8 @@ body {
 .status-placed { background: #fff3cd; color: #856404; }
 .status-confirmed { background: #d1ecf1; color: #0c5460; }
 .status-preparing { background: #d4edda; color: #155724; }
+.status-driver_assigned { background: #cfe2ff; color: #084298; }
+.status-picked_up { background: #e7f1ff; color: #004085; }
 .status-delivering { background: #cce5ff; color: #004085; }
 .status-delivered { background: #d4edda; color: var(--success); }
 .status-completed { background: #d4edda; color: var(--success); }
@@ -523,4 +526,153 @@ body {
     color: var(--text-light);
     display: flex;
     gap: 1.5rem;
+}
+
+/* ========================================
+   Driver Offer Modal Styles
+   ======================================== */
+
+.driver-offer-modal {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 9999;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.driver-offer-modal .modal-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.7);
+}
+
+.driver-offer-modal .modal-content {
+    position: relative;
+    background: white;
+    border-radius: 12px;
+    padding: 2rem;
+    max-width: 500px;
+    width: 90%;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+    animation: slideIn 0.3s ease-out;
+}
+
+@keyframes slideIn {
+    from {
+        transform: translateY(-50px);
+        opacity: 0;
+    }
+    to {
+        transform: translateY(0);
+        opacity: 1;
+    }
+}
+
+.driver-offer-modal h2 {
+    margin: 0 0 1.5rem 0;
+    color: #1a73e8;
+    font-size: 1.5rem;
+}
+
+.driver-offer-modal .offer-details {
+    margin: 1.5rem 0;
+    padding: 1rem;
+    background: #f8f9fa;
+    border-radius: 8px;
+}
+
+.driver-offer-modal .offer-details p {
+    margin: 0.5rem 0;
+    font-size: 1rem;
+}
+
+.driver-offer-modal .countdown {
+    font-weight: bold;
+    color: #d32f2f;
+    font-size: 1.1rem;
+    margin-top: 1rem;
+    text-align: center;
+}
+
+.driver-offer-modal .countdown.expired {
+    color: #999;
+}
+
+.driver-offer-modal .offer-actions {
+    display: flex;
+    gap: 1rem;
+}
+
+.driver-offer-modal .btn-accept {
+    flex: 1;
+    background: #4caf50;
+    color: white;
+    border: none;
+    padding: 1rem;
+    border-radius: 8px;
+    font-size: 1.1rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.3s;
+}
+
+.driver-offer-modal .btn-accept:hover {
+    background: #45a049;
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(76, 175, 80, 0.4);
+}
+
+.driver-offer-modal .btn-accept:active {
+    transform: translateY(0);
+}
+
+.driver-offer-modal .btn-reject {
+    flex: 1;
+    background: #f44336;
+    color: white;
+    border: none;
+    padding: 1rem;
+    border-radius: 8px;
+    font-size: 1.1rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.3s;
+}
+
+.driver-offer-modal .btn-reject:hover {
+    background: #da190b;
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(244, 67, 54, 0.4);
+}
+
+.driver-offer-modal .btn-reject:active {
+    transform: translateY(0);
+}
+
+/* Mobile responsiveness */
+@media (max-width: 600px) {
+    .driver-offer-modal .modal-content {
+        width: 95%;
+        padding: 1.5rem;
+    }
+
+    .driver-offer-modal h2 {
+        font-size: 1.3rem;
+    }
+
+    .driver-offer-modal .offer-actions {
+        flex-direction: column;
+    }
+
+    .driver-offer-modal .btn-accept,
+    .driver-offer-modal .btn-reject {
+        padding: 0.875rem;
+    }
 }

@@ -86,6 +86,12 @@ def lambda_handler(event, context):
             handle_order_status_changed(detail)
         elif detail_type == "DriverLocationUpdate":
             handle_driver_location_update(detail)
+        elif detail_type == "DriverOfferCreated":
+            handle_driver_offer_created(detail)
+        elif detail_type == "DeliveryPickedUp":
+            handle_delivery_picked_up(detail)
+        elif detail_type == "DeliveryCompleted":
+            handle_delivery_completed(detail)
         else:
             print(f"Unknown detail-type: {detail_type}")
 
@@ -109,8 +115,9 @@ def handle_order_status_changed(detail):
     order_id = detail.get("order_id")
     status = detail.get("status")
     timestamp = detail.get("timestamp")
+    user_id = detail.get("user_id")
 
-    print(f"Broadcasting order status: order_id={order_id}, status={status}")
+    print(f"Broadcasting order status: order_id={order_id}, status={status}, user_id={user_id}")
 
     # Get order details to find delivery_id
     try:
@@ -121,17 +128,34 @@ def handle_order_status_changed(detail):
             print(f"Order {order_id} not found")
             return
 
+        # Use user_id from detail if not provided, fall back to order
+        if not user_id:
+            user_id = order.get("user_id")
+
         delivery_id = order.get("delivery_id")
 
-        if not delivery_id:
-            print(f"Order {order_id} has no delivery_id yet - skipping broadcast")
-            return
+        # Collect all connection IDs to broadcast to
+        all_connection_ids = set()
 
-        # Find all connections subscribed to this delivery
-        connections = get_subscribed_connections(delivery_id)
+        # Method 1: Find connections subscribed to this delivery (if delivery_id exists)
+        if delivery_id:
+            connections = get_subscribed_connections(delivery_id)
+            all_connection_ids.update(connections)
+            print(f"Found {len(connections)} connections subscribed to delivery {delivery_id}")
 
-        if not connections:
-            print(f"No connections subscribed to delivery {delivery_id}")
+        # Method 2: Find connections for this specific user (customer)
+        if user_id:
+            from boto3.dynamodb.conditions import Attr
+            response = tracking_table.scan(
+                FilterExpression=Attr("user_id").eq(user_id),
+                ProjectionExpression="connection_id",
+            )
+            user_connections = [conn["connection_id"] for conn in response.get("Items", [])]
+            all_connection_ids.update(user_connections)
+            print(f"Found {len(user_connections)} connections for user {user_id}")
+
+        if not all_connection_ids:
+            print(f"No connections found for order {order_id} (tried delivery_id and user_id)")
             return
 
         # Broadcast to all connections
@@ -142,7 +166,8 @@ def handle_order_status_changed(detail):
             "timestamp": timestamp,
         }
 
-        broadcast_to_connections(connections, message)
+        broadcast_to_connections(list(all_connection_ids), message)
+        print(f"Broadcast to {len(all_connection_ids)} total connections")
 
     except Exception as e:
         print(f"Error handling order status changed: {str(e)}")
@@ -193,6 +218,66 @@ def handle_driver_location_update(detail):
     }
 
     broadcast_to_connections(connections, message)
+
+
+def handle_driver_offer_created(detail):
+    """
+    Broadcast driver offer to the specific driver's WebSocket connection.
+
+    Detail structure:
+    {
+        'offer_id': '...',
+        'driver_id': '...',
+        'delivery_id': '...',
+        'order_id': '...',
+        'offer_details': {...},
+        'expires_at': '...'
+    }
+    """
+    driver_id = detail.get("driver_id")
+    offer_id = detail.get("offer_id")
+
+    print(f"Broadcasting driver offer {offer_id} to driver {driver_id}")
+
+    # Find driver's WebSocket connection
+    try:
+        # Query tracking_connections by user_id (driver_id) and role=driver
+        from boto3.dynamodb.conditions import Attr
+
+        response = tracking_table.scan(
+            FilterExpression=Attr("user_id").eq(driver_id) & Attr("user_role").eq("driver"),
+            ProjectionExpression="connection_id",
+        )
+
+        connections = response.get("Items", [])
+        connection_ids = [conn["connection_id"] for conn in connections]
+
+        if not connection_ids:
+            print(f"No active connections for driver {driver_id}")
+            return
+
+        # Convert Decimals to floats for proper JSON serialization
+        offer_details = detail.get("offer_details", {})
+        if "estimated_distance_km" in offer_details and isinstance(offer_details["estimated_distance_km"], Decimal):
+            offer_details["estimated_distance_km"] = float(offer_details["estimated_distance_km"])
+        if "estimated_payout" in offer_details and isinstance(offer_details["estimated_payout"], Decimal):
+            offer_details["estimated_payout"] = float(offer_details["estimated_payout"])
+
+        # Broadcast offer
+        message = {
+            "type": "driver_offer",
+            "offer_id": offer_id,
+            "delivery_id": detail.get("delivery_id"),
+            "order_id": detail.get("order_id"),
+            "offer_details": offer_details,
+            "expires_at": detail.get("expires_at"),
+        }
+
+        broadcast_to_connections(connection_ids, message)
+
+    except Exception as e:
+        print(f"Error broadcasting driver offer: {str(e)}")
+        raise
 
 
 def get_subscribed_connections(delivery_id):
@@ -334,3 +419,127 @@ def haversine(lat1, lon1, lat2, lon2):
     c = 2 * atan2(sqrt(a), sqrt(1 - a))
 
     return R * c
+
+
+def handle_delivery_picked_up(detail):
+    """
+    Broadcast delivery picked up status to customer's WebSocket connection.
+
+    Detail structure:
+    {
+        'delivery_id': '...',
+        'order_id': '...',
+        'status': 'PICKED_UP',
+        'pickup_time': '...'
+    }
+    """
+    order_id = detail.get("order_id")
+
+    print(f"Broadcasting pickup status for order {order_id}")
+
+    # Get order to find user_id (customer)
+    try:
+        order_response = orders_table.get_item(Key={"order_id": order_id})
+        order = order_response.get("Item")
+
+        if not order:
+            print(f"Order {order_id} not found")
+            return
+
+        user_id = order.get("user_id")
+
+        if not user_id:
+            print(f"Order {order_id} has no user_id")
+            return
+
+        # Find customer's WebSocket connections
+        from boto3.dynamodb.conditions import Attr
+        response = tracking_table.scan(
+            FilterExpression=Attr("user_id").eq(user_id),
+            ProjectionExpression="connection_id",
+        )
+
+        connections = response.get("Items", [])
+        connection_ids = [conn["connection_id"] for conn in connections]
+
+        if not connection_ids:
+            print(f"No active connections for customer {user_id}")
+            return
+
+        # Broadcast status update
+        message = {
+            "type": "status",
+            "action": "status",
+            "order_id": order_id,
+            "delivery_id": detail.get("delivery_id"),
+            "status": "PICKED_UP",
+            "pickup_time": detail.get("pickup_time"),
+        }
+
+        broadcast_to_connections(connection_ids, message)
+        print(f"Pickup status broadcast to {len(connection_ids)} connections")
+
+    except Exception as e:
+        print(f"Error broadcasting pickup status: {str(e)}")
+
+
+def handle_delivery_completed(detail):
+    """
+    Broadcast delivery completed status to customer's WebSocket connection.
+
+    Detail structure:
+    {
+        'delivery_id': '...',
+        'order_id': '...',
+        'status': 'DELIVERED',
+        'delivery_time': '...'
+    }
+    """
+    order_id = detail.get("order_id")
+
+    print(f"Broadcasting completion status for order {order_id}")
+
+    # Get order to find user_id (customer)
+    try:
+        order_response = orders_table.get_item(Key={"order_id": order_id})
+        order = order_response.get("Item")
+
+        if not order:
+            print(f"Order {order_id} not found")
+            return
+
+        user_id = order.get("user_id")
+
+        if not user_id:
+            print(f"Order {order_id} has no user_id")
+            return
+
+        # Find customer's WebSocket connections
+        from boto3.dynamodb.conditions import Attr
+        response = tracking_table.scan(
+            FilterExpression=Attr("user_id").eq(user_id),
+            ProjectionExpression="connection_id",
+        )
+
+        connections = response.get("Items", [])
+        connection_ids = [conn["connection_id"] for conn in connections]
+
+        if not connection_ids:
+            print(f"No active connections for customer {user_id}")
+            return
+
+        # Broadcast status update
+        message = {
+            "type": "status",
+            "action": "status",
+            "order_id": order_id,
+            "delivery_id": detail.get("delivery_id"),
+            "status": "DELIVERED",
+            "delivery_time": detail.get("delivery_time"),
+        }
+
+        broadcast_to_connections(connection_ids, message)
+        print(f"Completion status broadcast to {len(connection_ids)} connections")
+
+    except Exception as e:
+        print(f"Error broadcasting completion status: {str(e)}")
