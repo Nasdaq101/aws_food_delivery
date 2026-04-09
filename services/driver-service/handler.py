@@ -2,17 +2,29 @@ import json
 import os
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal
 
 import boto3
 
 dynamodb = boto3.resource("dynamodb")
 
-DRIVERS_TABLE = os.environ.get("DRIVERS_TABLE", "FoodDelivery-Drivers")
-table = dynamodb.Table(DRIVERS_TABLE)
+DRIVERS_TABLE_NAME = os.environ.get("DRIVERS_TABLE_NAME", "FoodDelivery-Drivers")
+table = dynamodb.Table(DRIVERS_TABLE_NAME)
 
 
 def _utc_now_iso():
     return datetime.now(timezone.utc).isoformat()
+
+
+def _convert_floats_to_decimal(obj):
+    """Recursively convert float values to Decimal for DynamoDB compatibility"""
+    if isinstance(obj, float):
+        return Decimal(str(obj))
+    elif isinstance(obj, dict):
+        return {k: _convert_floats_to_decimal(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [_convert_floats_to_decimal(item) for item in obj]
+    return obj
 
 
 def _parse_body(event):
@@ -84,11 +96,15 @@ def _register_driver(event):
     name = data.get("name")
     if not name:
         return response(400, {"error": "name is required"})
+
+    # Convert floats to Decimals for DynamoDB
+    data = _convert_floats_to_decimal(data)
+
     driver_id = str(uuid.uuid4())
     now = _utc_now_iso()
     item = {
         "driver_id": driver_id,
-        "name": name,
+        "name": data.get("name"),
         "phone": data.get("phone", ""),
         "status": data.get("status", "available"),
         "location": data.get("location") or {},
@@ -119,6 +135,9 @@ def _update_driver(driver_id, event):
     data = _parse_body(event)
     if not data:
         return response(400, {"error": "JSON body required"})
+
+    # Convert floats to Decimals for DynamoDB
+    data = _convert_floats_to_decimal(data)
 
     # Check if driver exists first
     try:
