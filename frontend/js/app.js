@@ -1,12 +1,548 @@
 // ── Configuration ──
 const API_BASE = window.APP_CONFIG?.API_BASE_URL || "";
+const WS_URL = window.APP_CONFIG?.WEBSOCKET_URL || "";
 
 
 let currentUser = null;
 let authToken = null;
+
+// Helper function to parse JWT token
+function parseJWT(token) {
+    try {
+        const base64Url = token.split('.')[1];
+        const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
+        const jsonPayload = decodeURIComponent(atob(base64).split('').map(function(c) {
+            return '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2);
+        }).join(''));
+        return JSON.parse(jsonPayload);
+    } catch (e) {
+        console.error("Error parsing JWT:", e);
+        return {};
+    }
+}
 let cart = { items: [] }; // Removed restaurant_id - now supports multiple restaurants
 let pendingVerificationEmail = null;
 let previousPage = "home"; // Track where we came from
+
+// WebSocket connection manager
+let wsConnection = null;
+let wsReconnectAttempts = 0;
+const WS_MAX_RECONNECT_ATTEMPTS = 5;
+const WS_RECONNECT_DELAY = 2000; // 2 seconds
+
+// Map tracking
+let trackingMap = null;
+let driverMarker = null;
+let restaurantMarker = null;
+let destinationMarker = null;
+let routeLine = null;
+let currentOrderData = null;
+let currentTrackedOrder = null; // Full order object for tracking page
+
+
+// ── WebSocket Functions ──
+
+function connectWebSocket() {
+    if (!authToken) {
+        console.log("Cannot connect WebSocket: not authenticated");
+        return;
+    }
+
+    if (!WS_URL) {
+        console.error("WebSocket URL not configured");
+        return;
+    }
+
+    // Add JWT token as query parameter (used by authorizer)
+    const wsUrl = `${WS_URL}?token=${encodeURIComponent(authToken)}`;
+
+    try {
+        wsConnection = new WebSocket(wsUrl);
+
+        wsConnection.onopen = () => {
+            console.log("WebSocket connected");
+            wsReconnectAttempts = 0;
+            showToast("Real-time tracking connected", "success");
+        };
+
+        wsConnection.onmessage = (event) => {
+            console.log("WebSocket RAW message:", event.data);
+            const data = JSON.parse(event.data);
+            console.log("WebSocket PARSED message:", data);
+            handleWebSocketMessage(data);
+        };
+
+        wsConnection.onerror = (error) => {
+            console.error("WebSocket error:", error);
+        };
+
+        wsConnection.onclose = () => {
+            console.log("WebSocket disconnected");
+            wsConnection = null;
+
+            // Attempt reconnection
+            if (wsReconnectAttempts < WS_MAX_RECONNECT_ATTEMPTS) {
+                wsReconnectAttempts++;
+                console.log(`Reconnecting... attempt ${wsReconnectAttempts}`);
+                setTimeout(connectWebSocket, WS_RECONNECT_DELAY * wsReconnectAttempts);
+            }
+        };
+    } catch (error) {
+        console.error("Failed to create WebSocket:", error);
+    }
+}
+
+function disconnectWebSocket() {
+    if (wsConnection && wsConnection.readyState === WebSocket.OPEN) {
+        wsConnection.close();
+    }
+    wsConnection = null;
+}
+
+function sendWebSocketMessage(action, data) {
+    if (!wsConnection || wsConnection.readyState !== WebSocket.OPEN) {
+        console.error("WebSocket not connected");
+        return false;
+    }
+
+    wsConnection.send(JSON.stringify({ action, ...data }));
+    return true;
+}
+
+function handleWebSocketMessage(data) {
+    console.log("WebSocket message received:", data);
+
+    // Handle both 'type' and 'action' fields (backend might use either)
+    const messageType = data.type || data.action;
+
+    console.log("Message type:", messageType);
+
+    switch (messageType) {
+        case "status":
+            updateOrderStatus(data);
+            break;
+        case "location":
+        case "locationUpdate":  // From sendLocation route
+            console.log("Calling updateDriverLocation with:", data);
+            updateDriverLocation(data);
+            break;
+        case "driver_offer":  // Driver delivery offer
+            handleDriverOffer(data);
+            break;
+        default:
+            console.log("Unknown WebSocket message type:", messageType, data);
+    }
+}
+
+function updateOrderStatus(data) {
+    console.log("Order status update:", data);
+
+    const status = (data.status || "").toLowerCase();
+
+    // Update order card in orders list if visible
+    const orderCard = document.querySelector(`[data-order-id="${data.order_id}"]`);
+    if (orderCard) {
+        const statusBadge = orderCard.querySelector(".order-status");
+        if (statusBadge) {
+            statusBadge.textContent = data.status.toUpperCase();
+            statusBadge.className = `order-status status-${status}`;
+        }
+    }
+
+    // Update status badge on tracking page (top right)
+    const trackingStatusBadges = document.querySelectorAll(".order-status");
+    trackingStatusBadges.forEach(badge => {
+        // Only update if it's on the tracking page for this order
+        const trackingInfo = document.getElementById("tracking-info");
+        if (trackingInfo && trackingInfo.innerHTML.includes(data.order_id.substring(0, 8))) {
+            badge.textContent = data.status.toUpperCase();
+            badge.className = `order-status status-${status}`;
+        }
+    });
+
+    // Update tracking timeline if on tracking page
+    updateTrackingTimeline(data.order_id, data.status);
+
+    // Update the status-based info section in-place (without full page reload)
+    const trackingPage = document.getElementById("page-tracking");
+    if (trackingPage && trackingPage.style.display !== "none") {
+        const trackingInfo = document.getElementById("tracking-info");
+        if (trackingInfo && trackingInfo.innerHTML.includes(data.order_id.substring(0, 8))) {
+            console.log("Updating status-based info in-place");
+            // Find and update the status-based info section
+            updateStatusBasedInfo(data.status, data.order_id);
+        }
+    }
+
+    // Show notification
+    const statusMessages = {
+        "confirmed": "Your order has been confirmed!",
+        "preparing": "Restaurant is preparing your food",
+        "driver_assigned": "Driver is heading to the restaurant!",
+        "picked_up": "Driver picked up your order!",
+        "delivering": "Driver is on the way!",
+        "completed": "Order delivered! Enjoy your meal!",
+        "delivered": "Order delivered! Enjoy your meal!",
+        "cancelled": "Order has been cancelled"
+    };
+
+    const message = statusMessages[status] || `Order status: ${data.status}`;
+    showToast(message, status === "cancelled" ? "error" : "success");
+}
+
+function updateStatusBasedInfo(status, orderId) {
+    // Find the status-based info container
+    const statusInfoContainer = document.getElementById("status-based-info");
+    if (!statusInfoContainer) {
+        console.log("Status info container not found");
+        return;
+    }
+
+    // Update the stored order's status
+    if (currentTrackedOrder) {
+        currentTrackedOrder.status = status;
+    } else {
+        console.log("No current tracked order");
+        return;
+    }
+
+    // Get the new HTML for status-based info
+    const newStatusHTML = getStatusBasedInfo(currentTrackedOrder);
+
+    // Replace the content
+    statusInfoContainer.innerHTML = newStatusHTML;
+    console.log("Status-based info updated to:", status);
+}
+
+function initializeTrackingMap(orderData) {
+    const mapContainer = document.getElementById("tracking-map");
+    const mapLegend = document.getElementById("map-legend");
+    if (!mapContainer) return;
+
+    // Store order data for updates
+    currentOrderData = orderData;
+
+    // Show map container and legend
+    mapContainer.style.display = "block";
+    if (mapLegend) mapLegend.style.display = "block";
+
+    // Parse locations with fallbacks to San Francisco area
+    const restaurantLoc = parseLocation(orderData.restaurant_location, { lat: 37.7849, lng: -122.4094 });
+    const deliveryLoc = parseLocation(orderData.delivery_address, { lat: 37.7749, lng: -122.4194 });
+    const driverLoc = orderData.driver_location ? parseLocation(orderData.driver_location) : null;
+
+    // Initialize map if not already done
+    if (!trackingMap) {
+        const centerLat = restaurantLoc.lat;
+        const centerLng = restaurantLoc.lng;
+        trackingMap = L.map("tracking-map").setView([centerLat, centerLng], 13);
+
+        // Add OpenStreetMap tiles
+        L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+            attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+            maxZoom: 19,
+        }).addTo(trackingMap);
+    }
+
+    // Add restaurant marker
+    if (!restaurantMarker && restaurantLoc) {
+        restaurantMarker = L.marker([restaurantLoc.lat, restaurantLoc.lng], {
+            icon: L.divIcon({
+                className: "restaurant-marker",
+                html: '<div style="background: #457b9d; color: white; padding: 10px; border-radius: 50%; width: 45px; height: 45px; display: flex; align-items: center; justify-content: center; font-size: 22px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); border: 3px solid white;">🍽️</div>',
+                iconSize: [45, 45],
+                iconAnchor: [22.5, 22.5],
+            }),
+        }).addTo(trackingMap);
+        restaurantMarker.bindPopup("<b>Restaurant</b><br>Preparing your order");
+    }
+
+    // Add destination marker
+    if (!destinationMarker && deliveryLoc) {
+        destinationMarker = L.marker([deliveryLoc.lat, deliveryLoc.lng], {
+            icon: L.divIcon({
+                className: "destination-marker",
+                html: '<div style="background: #2d6a4f; color: white; padding: 10px; border-radius: 50%; width: 45px; height: 45px; display: flex; align-items: center; justify-content: center; font-size: 22px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); border: 3px solid white;">🏠</div>',
+                iconSize: [45, 45],
+                iconAnchor: [22.5, 22.5],
+            }),
+        }).addTo(trackingMap);
+        destinationMarker.bindPopup("<b>Delivery Address</b><br>Your location");
+    }
+
+    // Add driver marker if available
+    if (driverLoc) {
+        updateDriverMarkerOnMap(driverLoc.lat, driverLoc.lng);
+
+        // Draw route: Restaurant -> Driver -> Destination
+        drawRoute(restaurantLoc, driverLoc, deliveryLoc);
+    } else {
+        // Draw direct line from restaurant to destination (before driver assigned)
+        drawRoute(restaurantLoc, null, deliveryLoc);
+    }
+
+    // Fit bounds to show all markers
+    fitMapBounds(restaurantLoc, deliveryLoc, driverLoc, orderData.status);
+}
+
+function parseLocation(locationData, fallback = null) {
+    if (!locationData) return fallback;
+
+    // Handle different formats: {lat, lng}, "lat,lng", {latitude, longitude}
+    if (typeof locationData === 'string') {
+        const parts = locationData.split(',');
+        if (parts.length === 2) {
+            return { lat: parseFloat(parts[0]), lng: parseFloat(parts[1]) };
+        }
+    } else if (typeof locationData === 'object') {
+        if (locationData.lat !== undefined && locationData.lng !== undefined) {
+            return { lat: parseFloat(locationData.lat), lng: parseFloat(locationData.lng) };
+        } else if (locationData.latitude !== undefined && locationData.longitude !== undefined) {
+            return { lat: parseFloat(locationData.latitude), lng: parseFloat(locationData.longitude) };
+        }
+    }
+
+    return fallback;
+}
+
+function drawRoute(restaurantLoc, driverLoc, deliveryLoc) {
+    // Remove existing route line
+    if (routeLine) {
+        trackingMap.removeLayer(routeLine);
+    }
+
+    const points = [];
+
+    if (driverLoc) {
+        // Driver is on the way: Restaurant -> Driver -> Destination
+        points.push([restaurantLoc.lat, restaurantLoc.lng]);
+        points.push([driverLoc.lat, driverLoc.lng]);
+        points.push([deliveryLoc.lat, deliveryLoc.lng]);
+    } else {
+        // No driver yet: Restaurant -> Destination
+        points.push([restaurantLoc.lat, restaurantLoc.lng]);
+        points.push([deliveryLoc.lat, deliveryLoc.lng]);
+    }
+
+    // Draw polyline
+    routeLine = L.polyline(points, {
+        color: '#e63946',
+        weight: 4,
+        opacity: 0.7,
+        dashArray: driverLoc ? null : '10, 10',  // Dashed when no driver
+    }).addTo(trackingMap);
+}
+
+function updateDriverMarkerOnMap(lat, lng) {
+    if (!driverMarker) {
+        driverMarker = L.marker([lat, lng], {
+            icon: L.divIcon({
+                className: "driver-marker",
+                html: '<div style="background: #e63946; color: white; padding: 10px; border-radius: 50%; width: 45px; height: 45px; display: flex; align-items: center; justify-content: center; font-size: 22px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); border: 3px solid white; animation: pulse 2s infinite;">🚗</div>',
+                iconSize: [45, 45],
+                iconAnchor: [22.5, 22.5],
+            }),
+        }).addTo(trackingMap);
+        driverMarker.bindPopup("<b>Driver</b><br>On the way to you!");
+    } else {
+        // Animate marker to new position
+        driverMarker.setLatLng([lat, lng]);
+    }
+}
+
+function fitMapBounds(restaurantLoc, deliveryLoc, driverLoc, orderStatus) {
+    const bounds = [];
+
+    if (restaurantLoc) bounds.push([restaurantLoc.lat, restaurantLoc.lng]);
+    if (deliveryLoc) bounds.push([deliveryLoc.lat, deliveryLoc.lng]);
+    if (driverLoc) bounds.push([driverLoc.lat, driverLoc.lng]);
+
+    if (bounds.length > 0) {
+        const latLngBounds = L.latLngBounds(bounds);
+        trackingMap.fitBounds(latLngBounds, {
+            padding: [80, 80],
+            maxZoom: 15
+        });
+    }
+
+    // Focus on specific marker based on status
+    if (orderStatus === 'PREPARING' && restaurantLoc) {
+        setTimeout(() => trackingMap.setView([restaurantLoc.lat, restaurantLoc.lng], 14), 500);
+    } else if (orderStatus === 'DELIVERING' && driverLoc) {
+        setTimeout(() => trackingMap.setView([driverLoc.lat, driverLoc.lng], 14), 500);
+    }
+}
+
+function updateDriverLocation(data) {
+    console.log("updateDriverLocation called with:", data);
+    console.log("Map exists?", trackingMap !== null);
+    console.log("Driver marker exists?", driverMarker !== null);
+
+    const driverLoc = { lat: data.lat, lng: data.lng };
+    console.log("Driver location:", driverLoc);
+
+    // Update ETA display
+    const etaElement = document.getElementById("tracking-eta");
+    if (etaElement) {
+        if (data.eta) {
+            etaElement.innerHTML = `🕐 <strong>ETA:</strong> ${data.eta} minutes`;
+        } else {
+            // Calculate simple distance-based ETA (rough estimate)
+            if (currentOrderData && currentOrderData.delivery_address) {
+                const destLoc = parseLocation(currentOrderData.delivery_address);
+                if (destLoc) {
+                    const distance = calculateDistance(driverLoc.lat, driverLoc.lng, destLoc.lat, destLoc.lng);
+                    const eta = Math.ceil(distance / 0.5); // Assume 30 km/h average speed
+                    etaElement.innerHTML = `🕐 <strong>ETA:</strong> ~${eta} minutes`;
+                }
+            }
+        }
+    }
+
+    // Update driver location display
+    const locationElement = document.getElementById("driver-location");
+    if (locationElement) {
+        const timestamp = data.sent_at || data.timestamp || new Date().toISOString();
+        const timeStr = new Date(timestamp).toLocaleTimeString();
+        locationElement.innerHTML = `
+            <div style="padding: 0.75rem; background: linear-gradient(135deg, #e63946 0%, #c1121f 100%); color: white; border-radius: 8px; margin-top: 0.75rem;">
+                <div style="display: flex; align-items: center; margin-bottom: 0.5rem;">
+                    <span style="font-size: 1.5rem; margin-right: 0.5rem;">🚗</span>
+                    <strong style="font-size: 1rem;">Driver is on the way!</strong>
+                </div>
+                <span style="font-size: 0.8rem; opacity: 0.9;">Last updated: ${timeStr}</span>
+            </div>
+        `;
+        showToast("📍 Driver location updated", "success");
+    }
+
+    // Update map marker and route
+    if (trackingMap) {
+        console.log("Updating driver marker on map...");
+        updateDriverMarkerOnMap(driverLoc.lat, driverLoc.lng);
+
+        if (currentOrderData) {
+            // Redraw route with new driver position
+            const restaurantLoc = parseLocation(currentOrderData.restaurant_location, { lat: 37.7849, lng: -122.4094 });
+            const deliveryLoc = parseLocation(currentOrderData.delivery_address, { lat: 37.7749, lng: -122.4194 });
+            console.log("Redrawing route:", restaurantLoc, driverLoc, deliveryLoc);
+            drawRoute(restaurantLoc, driverLoc, deliveryLoc);
+        }
+
+        // Pan to driver location
+        console.log("Panning map to driver location");
+        trackingMap.panTo([driverLoc.lat, driverLoc.lng]);
+    } else {
+        console.log("❌ Map not initialized, cannot update driver location");
+    }
+}
+
+// Helper function to calculate distance between two points (Haversine formula)
+function calculateDistance(lat1, lon1, lat2, lon2) {
+    const R = 6371; // Radius of Earth in km
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLon = (lon2 - lon1) * Math.PI / 180;
+    const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+              Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+              Math.sin(dLon/2) * Math.sin(dLon/2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    return R * c; // Distance in km
+}
+
+function getStatusBasedInfo(order) {
+    const status = (order.status || "").toUpperCase();
+
+    if (status === "PLACED" || status === "PENDING") {
+        return `
+            <div style="background: linear-gradient(135deg, #fff3cd 0%, #ffeaa7 100%); padding: 1.5rem; border-radius: 8px; border-left: 4px solid #f39c12;">
+                <h4 style="margin: 0 0 0.5rem 0; font-size: 1rem; color: #856404;">📋 Order Received</h4>
+                <p style="color: #856404; margin: 0; font-size: 0.9rem;">
+                    We've received your order and are processing it. You'll be notified once the restaurant confirms!
+                </p>
+            </div>
+        `;
+    } else if (status === "CONFIRMED") {
+        return `
+            <div style="background: linear-gradient(135deg, #d1ecf1 0%, #bee5eb 100%); padding: 1.5rem; border-radius: 8px; border-left: 4px solid #17a2b8;">
+                <h4 style="margin: 0 0 0.5rem 0; font-size: 1rem; color: #0c5460;">✅ Restaurant Confirmed</h4>
+                <p style="color: #0c5460; margin: 0; font-size: 0.9rem;">
+                    The restaurant has confirmed your order. We're finding the best driver for you!
+                </p>
+            </div>
+        `;
+    } else if (status === "PREPARING") {
+        return `
+            <div style="background: linear-gradient(135deg, #d4edda 0%, #c3e6cb 100%); padding: 1.5rem; border-radius: 8px; border-left: 4px solid #28a745;">
+                <h4 style="margin: 0 0 0.5rem 0; font-size: 1rem; color: #155724;">👨‍🍳 Preparing Your Food</h4>
+                <p style="color: #155724; margin: 0 0 0.75rem 0; font-size: 0.9rem;">
+                    The restaurant is preparing your delicious meal. A driver will be assigned shortly!
+                </p>
+                <div id="tracking-eta" style="font-size: 1.1rem; font-weight: 600; color: #155724; margin-bottom: 0.5rem;"></div>
+                <div id="driver-location"></div>
+            </div>
+        `;
+    } else if (status === "DRIVER_ASSIGNED") {
+        return `
+            <div style="background: linear-gradient(135deg, #cfe2ff 0%, #b8daff 100%); padding: 1.5rem; border-radius: 8px; border-left: 4px solid #0d6efd;">
+                <h4 style="margin: 0 0 0.5rem 0; font-size: 1rem; color: #052c65;">🚗 Driver Assigned</h4>
+                <p style="color: #052c65; margin: 0 0 0.75rem 0; font-size: 0.9rem;">
+                    Your driver is on the way to the restaurant to pick up your order!
+                </p>
+                <div id="tracking-eta" style="font-size: 1.1rem; font-weight: 600; color: #052c65; margin-bottom: 0.5rem;"></div>
+                <div id="driver-location"></div>
+            </div>
+        `;
+    } else if (status === "PICKED_UP") {
+        return `
+            <div style="background: linear-gradient(135deg, #e7f1ff 0%, #cfe2ff 100%); padding: 1.5rem; border-radius: 8px; border-left: 4px solid #0d6efd;">
+                <h4 style="margin: 0 0 0.5rem 0; font-size: 1rem; color: #004085;">📦 Order Picked Up</h4>
+                <p style="color: #004085; margin: 0 0 0.75rem 0; font-size: 0.9rem;">
+                    Your driver has picked up your order from the restaurant and will be on the way shortly!
+                </p>
+                <div id="tracking-eta" style="font-size: 1.1rem; font-weight: 600; color: #004085; margin-bottom: 0.5rem;"></div>
+                <div id="driver-location"></div>
+            </div>
+        `;
+    } else if (status === "DELIVERING") {
+        return `
+            <div style="background: linear-gradient(135deg, #cce5ff 0%, #b8daff 100%); padding: 1.5rem; border-radius: 8px; border-left: 4px solid #004085;">
+                <h4 style="margin: 0 0 0.5rem 0; font-size: 1rem; color: #004085;">🚗 Out for Delivery!</h4>
+                <p style="color: #004085; margin: 0 0 0.75rem 0; font-size: 0.9rem;">
+                    Your driver is on the way to your location with your food!
+                </p>
+                <div id="tracking-eta" style="font-size: 1.1rem; font-weight: 600; color: #004085; margin-bottom: 0.5rem;"></div>
+                <div id="driver-location"></div>
+            </div>
+        `;
+    } else if (order.delivery_id && (status === "CONFIRMED" || status === "PLACED" || status === "PENDING" || status === "PREPARING")) {
+        // Show tracking info for any order with a delivery_id, even if not DELIVERING yet
+        return `
+            <div style="background: linear-gradient(135deg, #cce5ff 0%, #b8daff 100%); padding: 1.5rem; border-radius: 8px; border-left: 4px solid #004085;">
+                <h4 style="margin: 0 0 0.5rem 0; font-size: 1rem; color: #004085;">📍 Live Tracking Available</h4>
+                <p style="color: #004085; margin: 0.25rem 0 0.75rem 0; font-size: 0.9rem;">
+                    <strong>Delivery ID:</strong> ${order.delivery_id.substring(0, 8)}
+                </p>
+                <div id="tracking-eta" style="font-size: 1.1rem; font-weight: 600; color: #004085; margin-bottom: 0.5rem;"></div>
+                <div id="driver-location"></div>
+            </div>
+        `;
+    } else if (status === "COMPLETED" || status === "DELIVERED") {
+        return `
+            <div style="background: linear-gradient(135deg, #d4edda 0%, #c3e6cb 100%); padding: 1.5rem; border-radius: 8px; border-left: 4px solid #28a745; text-align: center;">
+                <h4 style="margin: 0 0 0.5rem 0; font-size: 1.2rem; color: #155724;">🎉 Delivered!</h4>
+                <p style="color: #155724; margin: 0; font-size: 0.9rem;">
+                    Your order has been delivered. Enjoy your meal!
+                </p>
+            </div>
+        `;
+    } else {
+        return `
+            <div style="background: var(--bg); padding: 1rem; border-radius: 6px; text-align: center;">
+                <p style="color: var(--text-light); font-style: italic; margin: 0;">⏳ Processing your order...</p>
+            </div>
+        `;
+    }
+}
 
 
 function showPage(pageId) {
@@ -25,9 +561,25 @@ function showPage(pageId) {
         history.pushState({ page: pageId, previousPage: previousPage }, '', `#${pageId}`);
     }
 
+    // Load driver dashboard content if on driver page
+    if (pageId === "driver-dashboard") {
+        loadDriverDashboard();
+    } else if (pageId === "driver-deliveries") {
+        loadDriverDeliveries();
+    } else if (pageId === "profile") {
+        loadProfile();
+    }
+
     if (pageId === "restaurants") loadRestaurants();
     if (pageId === "orders") loadOrders();
     if (pageId === "cart") renderCart();
+    if (pageId === "tracking") {
+        // If navigating directly to tracking without order ID, redirect to orders
+        const currentContent = document.getElementById("tracking-info")?.innerHTML || '';
+        if (!currentContent || currentContent.includes('Loading')) {
+            showPage("orders");
+        }
+    }
 }
 
 // Handle browser back/forward buttons
@@ -46,6 +598,13 @@ window.addEventListener('popstate', (event) => {
         if (pageId === "restaurants") loadRestaurants();
         if (pageId === "orders") loadOrders();
         if (pageId === "cart") renderCart();
+        if (pageId === "tracking") {
+            // If navigating back to tracking without order ID, redirect to orders
+            const currentContent = document.getElementById("tracking-info")?.innerHTML || '';
+            if (!currentContent || currentContent.includes('Loading')) {
+                showPage("orders");
+            }
+        }
     }
 });
 
@@ -90,8 +649,16 @@ async function handleLogin(e) {
         const data = await apiCall("/auth/login", "POST", { email, password });
         if (data.access_token || data.id_token) {
             authToken = data.id_token || data.access_token;
-            // TODO: fetch user info from token or API
-            currentUser = { email };
+
+            // Decode JWT to get user info and role
+            const userInfo = parseJWT(authToken);
+            currentUser = {
+                email,
+                sub: userInfo.sub,
+                role: userInfo['custom:role'] || 'customer'
+            };
+
+            console.log("User logged in:", currentUser);
             onLoginSuccess();
         } else {
             showToast(data.message || "Login failed", "error");
@@ -163,11 +730,24 @@ async function onLoginSuccess() {
     document.getElementById("nav-user").classList.remove("hidden");
     document.getElementById("user-name").textContent = currentUser?.name || currentUser?.email || "User";
 
-    // Load cart from backend
-    await loadCartFromServer();
+    // Store auth token in localStorage for persistence
+    localStorage.setItem("authToken", authToken);
+    localStorage.setItem("currentUser", JSON.stringify(currentUser));
 
-    showToast("Welcome back!", "success");
-    showPage("home");
+    // Connect WebSocket for real-time updates
+    connectWebSocket();
+
+    // Show different interface based on role
+    if (currentUser?.role === 'driver') {
+        showToast("Welcome Driver!", "success");
+        showDriverInterface();
+        showPage("driver-dashboard");
+    } else {
+        // Load cart from backend (only for customers)
+        await loadCartFromServer();
+        showToast("Welcome back!", "success");
+        showPage("home");
+    }
 }
 
 async function loadCartFromServer() {
@@ -226,11 +806,19 @@ async function updateCartQuantityOnServer(lineId, quantity) {
 }
 
 async function logout() {
+    // Disconnect WebSocket before clearing token
+    disconnectWebSocket();
+
     // Don't clear cart on backend - it should persist!
     // Just clear local state
     currentUser = null;
     authToken = null;
     cart = { items: [] };
+
+    // Clear localStorage
+    localStorage.removeItem("authToken");
+    localStorage.removeItem("currentUser");
+
     updateCartCount();
     document.getElementById("nav-auth").classList.remove("hidden");
     document.getElementById("nav-user").classList.add("hidden");
@@ -641,6 +1229,13 @@ async function loadOrders() {
     try {
         const data = await apiCall("/orders");
         const orders = data.orders || data || [];
+
+        // Debug: log the orders to see actual status values
+        console.log("Loaded orders:", orders);
+        if (orders.length > 0) {
+            console.log("First order status:", orders[0].status, "Type:", typeof orders[0].status);
+        }
+
         container.innerHTML = orders.length
             ? orders.map(renderOrderCard).join("")
             : '<div class="empty-state"><p>No orders yet</p></div>';
@@ -652,55 +1247,301 @@ async function loadOrders() {
 
 
 function renderOrderCard(order) {
-    const statusClass = `status-${order.status || "pending"}`;
+    const status = (order.status || "pending").toLowerCase();
+    const statusClass = `status-${status}`;
+
+    // Format created_at date
+    let dateStr = order.created_at || '';
+    try {
+        if (dateStr) {
+            const date = new Date(dateStr);
+            dateStr = date.toLocaleString();
+        }
+    } catch (e) {
+        // Keep original string if parsing fails
+    }
+
     return `
-        <div class="order-card">
+        <div class="order-card clickable" data-order-id="${order.order_id}" onclick="trackOrder('${order.order_id}')">
             <div class="order-header">
                 <div>
                     <strong>Order #${(order.order_id || "").substring(0, 8)}</strong>
-                    <div style="color: var(--text-light); font-size: 0.85rem">${order.created_at || ''}</div>
+                    <div style="color: var(--text-light); font-size: 0.85rem">${dateStr}</div>
                 </div>
                 <span class="order-status ${statusClass}">${(order.status || "pending").toUpperCase()}</span>
             </div>
-            <div>
+            <div style="margin: 0.75rem 0;">
                 ${(order.items || []).map((i) => `<span>${i.name} x${i.quantity}</span>`).join(", ")}
             </div>
-            <div style="display: flex; justify-content: space-between; margin-top: 0.75rem">
-                <strong>$${parseFloat(order.total || 0).toFixed(2)}</strong>
-                ${order.status === "delivering" ? `<button class="btn btn-primary btn-small" onclick="trackOrder('${order.order_id}')">Track</button>` : ""}
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <strong style="font-size: 1.1rem;">$${parseFloat(order.total || 0).toFixed(2)}</strong>
+                <span style="color: var(--text-light); font-size: 0.85rem;">Click to track →</span>
             </div>
         </div>
     `;
 }
 
 
-function trackOrder(orderId) {
+async function trackOrder(orderId) {
     showPage("tracking");
+
+    // Store the order ID in localStorage for persistence across refreshes
+    localStorage.setItem("currentTrackedOrderId", orderId);
+
     const info = document.getElementById("tracking-info");
     const timeline = document.getElementById("tracking-status");
 
-    info.innerHTML = `<h3>Order #${orderId.substring(0, 8)}</h3>`;
+    // Clean up previous map and order data
+    if (trackingMap) {
+        trackingMap.remove();
+        trackingMap = null;
+        driverMarker = null;
+        restaurantMarker = null;
+        destinationMarker = null;
+        routeLine = null;
+        currentOrderData = null;
+    }
+    currentTrackedOrder = null;
+    document.getElementById("tracking-map").style.display = "none";
+    const mapLegend = document.getElementById("map-legend");
+    if (mapLegend) mapLegend.style.display = "none";
 
+    // Show loading state
+    info.innerHTML = '<div style="padding: 2rem; text-align: center;">Loading order details...</div>';
+    timeline.innerHTML = '';
+
+    // Fetch order details from API
+    try {
+        const data = await apiCall(`/orders/${orderId}`);
+        const order = data.order;
+
+        // Store order globally for status updates
+        currentTrackedOrder = order;
+
+        console.log("Order data:", order); // Debug
+
+        // Calculate total from items
+        const total = (order.items || []).reduce((sum, item) =>
+            sum + (parseFloat(item.unit_price_cents || 0) / 100) * (item.quantity || 0), 0);
+
+        // Format date
+        let dateStr = order.created_at || '';
+        try {
+            if (dateStr) {
+                const date = new Date(dateStr);
+                dateStr = date.toLocaleString();
+            }
+        } catch (e) {
+            // Keep original string if parsing fails
+        }
+
+        const status = (order.status || "pending").toLowerCase();
+        const statusClass = `status-${status}`;
+
+        // Render detailed order info
+        info.innerHTML = `
+            <h2 style="margin-bottom: 1.5rem;">Order Details</h2>
+            <div style="background: var(--white); padding: 2rem; border-radius: var(--radius); box-shadow: var(--shadow); margin-bottom: 2rem;">
+                <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 1.5rem; padding-bottom: 1rem; border-bottom: 2px solid var(--border);">
+                    <div>
+                        <h3 style="margin: 0; font-size: 1.5rem;">Order #${orderId.substring(0, 8)}</h3>
+                        <p style="color: var(--text-light); font-size: 0.9rem; margin: 0.5rem 0 0 0;">
+                            <strong>Placed:</strong> ${dateStr}
+                        </p>
+                        ${order.restaurant_id ? `
+                            <p style="color: var(--text-light); font-size: 0.9rem; margin: 0.25rem 0 0 0;">
+                                <strong>Restaurant ID:</strong> ${order.restaurant_id.substring(0, 8)}
+                            </p>
+                        ` : ''}
+                    </div>
+                    <span class="order-status ${statusClass}" style="font-size: 1rem; padding: 0.5rem 1rem;">
+                        ${(order.status || "pending").toUpperCase()}
+                    </span>
+                </div>
+
+                <div style="margin-bottom: 1.5rem;">
+                    <h4 style="margin-bottom: 1rem; font-size: 1.1rem; color: var(--text);">Order Items</h4>
+                    ${(order.items || []).map(item => `
+                        <div style="display: flex; justify-content: space-between; align-items: center; padding: 0.75rem; background: var(--bg); border-radius: 6px; margin-bottom: 0.5rem;">
+                            <div>
+                                <strong>${item.name}</strong>
+                                <span style="color: var(--text-light); margin-left: 0.5rem;">x${item.quantity}</span>
+                            </div>
+                            <span style="font-weight: 600;">$${((item.unit_price_cents || 0) / 100 * item.quantity).toFixed(2)}</span>
+                        </div>
+                    `).join('')}
+                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 1rem 0.75rem; margin-top: 1rem; border-top: 2px solid var(--border); font-size: 1.2rem;">
+                        <strong>Total:</strong>
+                        <strong style="color: var(--primary);">$${parseFloat(order.total || total).toFixed(2)}</strong>
+                    </div>
+                </div>
+
+                <div id="status-based-info">
+                    ${getStatusBasedInfo(order)}
+                </div>
+            </div>
+        `;
+
+        // Render timeline based on current status
+        updateTrackingTimeline(orderId, order.status);
+
+        // Initialize map for all orders
+        // Driver location will be updated via WebSocket
+        const mapData = {
+            restaurant_location: order.restaurant_location || "37.7749,-122.4194", // SF default
+            delivery_address: order.delivery_address || "37.7849,-122.4094", // SF default
+            driver_location: order.driver_location || null, // Will be updated via WebSocket
+            status: order.status
+        };
+        initializeTrackingMap(mapData);
+
+        // Subscribe to WebSocket updates for this order
+        if (order.delivery_id) {
+            // Use the full delivery_id for WebSocket subscription
+            const deliveryId = order.delivery_id;
+            console.log(`Auto-subscribing to delivery: ${deliveryId}`);
+            subscribeToDelivery(deliveryId);
+        } else {
+            console.log("Order doesn't have delivery_id yet - map shows restaurant and destination");
+        }
+    } catch (err) {
+        console.error("Failed to load order:", err);
+        info.innerHTML = `
+            <div style="background: var(--white); padding: 2rem; border-radius: var(--radius); text-align: center;">
+                <p style="color: var(--primary); margin-bottom: 1rem;">❌ Failed to load order details</p>
+                <p style="color: var(--text-light); font-size: 0.9rem;">${err.message || 'Unknown error'}</p>
+                <button class="btn btn-primary" onclick="showPage('orders')" style="margin-top: 1rem;">Back to Orders</button>
+            </div>
+        `;
+        timeline.innerHTML = '';
+    }
+}
+
+function subscribeToDelivery(deliveryId) {
+    // If WebSocket isn't connected, connect it first
+    if (!wsConnection || wsConnection.readyState !== WebSocket.OPEN) {
+        console.log("WebSocket not connected, connecting now...");
+
+        // Connect WebSocket if we have auth token
+        if (authToken) {
+            connectWebSocket();
+
+            // Wait for connection to establish, then subscribe
+            const checkConnection = setInterval(() => {
+                if (wsConnection && wsConnection.readyState === WebSocket.OPEN) {
+                    clearInterval(checkConnection);
+                    sendWebSocketMessage("subscribe", { delivery_id: deliveryId });
+                    console.log(`Subscribed to delivery ${deliveryId}`);
+                    showToast("Connected to real-time tracking", "success");
+                }
+            }, 100);
+
+            // Stop checking after 5 seconds
+            setTimeout(() => clearInterval(checkConnection), 5000);
+        } else {
+            console.error("Cannot subscribe: No auth token");
+            showToast("Real-time tracking unavailable - please login", "error");
+        }
+        return;
+    }
+
+    sendWebSocketMessage("subscribe", { delivery_id: deliveryId });
+    console.log(`Subscribed to delivery ${deliveryId}`);
+}
+
+function updateTrackingTimeline(orderId, status) {
+    const timeline = document.getElementById("tracking-status");
+    if (!timeline) return;
+
+    // Normalize status to uppercase
+    const normalizedStatus = (status || "").toUpperCase();
+
+    // Map status to timeline steps with descriptions
     const steps = [
-        { label: "Order Placed", status: "completed" },
-        { label: "Restaurant Confirmed", status: "completed" },
-        { label: "Preparing Food", status: "completed" },
-        { label: "Driver Picked Up", status: "active" },
-        { label: "On the Way", status: "" },
-        { label: "Delivered", status: "" },
+        {
+            key: "PLACED",
+            label: "Order Placed",
+            description: "Your order has been received",
+            icon: "📋"
+        },
+        {
+            key: "CONFIRMED",
+            label: "Restaurant Confirmed",
+            description: "Restaurant accepted your order",
+            icon: "✅"
+        },
+        {
+            key: "PREPARING",
+            label: "Preparing Food",
+            description: "Your food is being prepared",
+            icon: "👨‍🍳"
+        },
+        {
+            key: "DRIVER_ASSIGNED",
+            label: "Driver En Route",
+            description: "Driver heading to restaurant",
+            icon: "🚗"
+        },
+        {
+            key: "PICKED_UP",
+            label: "Picked Up",
+            description: "Driver picked up your order",
+            icon: "📦"
+        },
+        {
+            key: "DELIVERING",
+            label: "Out for Delivery",
+            description: "Driver is on the way to you",
+            icon: "🚚"
+        },
+        {
+            key: "COMPLETED",
+            label: "Delivered",
+            description: "Enjoy your meal!",
+            icon: "🎉"
+        },
     ];
 
-    timeline.innerHTML = steps
-        .map(
-            (s) => `
-        <div class="tracking-step ${s.status}">
-            <strong>${s.label}</strong>
-        </div>
-    `
-        )
-        .join("");
+    // Determine which step is active based on status
+    let activeStepIndex = -1;
+    if (normalizedStatus === "PENDING" || normalizedStatus === "PLACED") {
+        activeStepIndex = 0;
+    } else if (normalizedStatus === "CONFIRMED") {
+        activeStepIndex = 1;
+    } else if (normalizedStatus === "PREPARING") {
+        activeStepIndex = 2;
+    } else if (normalizedStatus === "DRIVER_ASSIGNED") {
+        activeStepIndex = 3;
+    } else if (normalizedStatus === "PICKED_UP") {
+        activeStepIndex = 4;
+    } else if (normalizedStatus === "DELIVERING") {
+        activeStepIndex = 5;
+    } else if (normalizedStatus === "COMPLETED" || normalizedStatus === "DELIVERED") {
+        activeStepIndex = 6;
+    }
 
-    // TODO: connect WebSocket for real-time updates
+    timeline.innerHTML = `
+        <h3 style="margin-bottom: 1.5rem;">Order Progress</h3>
+        ${steps
+            .map((s, idx) => {
+                let stepClass = "";
+                if (idx < activeStepIndex) stepClass = "completed";
+                else if (idx === activeStepIndex) stepClass = "active";
+
+                return `
+                <div class="tracking-step ${stepClass}">
+                    <div style="display: flex; align-items: flex-start;">
+                        <span style="font-size: 1.5rem; margin-right: 0.75rem;">${s.icon}</span>
+                        <div>
+                            <strong style="display: block; margin-bottom: 0.25rem;">${s.label}</strong>
+                            <span style="color: var(--text-light); font-size: 0.85rem;">${s.description}</span>
+                        </div>
+                    </div>
+                </div>
+            `;
+            })
+            .join("")}
+    `;
 }
 
 
@@ -733,7 +1574,891 @@ function getMockMenu() {
     ];
 }
 
+// ========================================
+// Driver Interface Functions
+// ========================================
+
+function showDriverInterface() {
+    // Hide customer navigation items and replace with driver navigation
+    const navLinks = document.querySelector('.nav-links');
+    if (navLinks) {
+        navLinks.innerHTML = `
+            <a href="#" onclick="showPage('driver-dashboard')">Dashboard</a>
+            <a href="#" onclick="showPage('driver-deliveries')">My Deliveries</a>
+        `;
+    }
+
+    console.log("Driver interface activated");
+}
+
+async function loadDriverDashboard() {
+    const dashboard = document.getElementById("driver-dashboard-content");
+    if (!dashboard) return;
+
+    // Check driver registration status
+    let driverStatus = "Checking...";
+    let driverInfo = null;
+    try {
+        driverInfo = await apiCall(`/drivers/${currentUser.sub}`);
+        if (driverInfo) {
+            driverStatus = driverInfo.status === 'available' ? '✅ Available' : `⚠️ ${driverInfo.status}`;
+        }
+    } catch (err) {
+        driverStatus = '❌ Not Registered';
+        console.error("Driver not found:", err);
+    }
+
+    dashboard.innerHTML = `
+        <div style="text-align: center; padding: 2rem;">
+            <h2>🚗 Driver Dashboard</h2>
+            <p style="color: var(--text-light); margin-bottom: 2rem;">
+                Waiting for delivery assignments...
+            </p>
+
+            <div style="background: var(--white); padding: 2rem; border-radius: var(--radius); margin: 2rem auto; max-width: 500px;">
+                <h3>Status</h3>
+                <p style="font-size: 1.2rem;">
+                    ${driverStatus}
+                </p>
+                ${!driverInfo ? `
+                    <div style="margin-top: 1rem; padding: 1rem; background: var(--warning-bg); border-radius: 6px;">
+                        <p style="color: var(--warning); margin: 0;">
+                            ⚠️ Driver profile not found. Please complete your profile to receive orders.
+                        </p>
+                        <button class="btn btn-primary" onclick="showPage('profile')" style="margin-top: 0.5rem;">
+                            Complete Profile
+                        </button>
+                    </div>
+                ` : ''}
+            </div>
+
+            <div style="background: var(--light-bg); padding: 1.5rem; border-radius: var(--radius); margin-top: 1rem;">
+                <p><strong>📱 You will receive delivery offers here</strong></p>
+                <p style="color: var(--text-light); font-size: 0.9rem; margin-top: 0.5rem;">
+                    When a customer places an order, you'll see a popup modal with:<br>
+                    • Pickup location<br>
+                    • Delivery location<br>
+                    • Distance & estimated payout<br>
+                    • 2-minute countdown to accept/decline
+                </p>
+            </div>
+
+            <div style="margin-top: 2rem;">
+                <button class="btn btn-secondary" onclick="showPage('driver-deliveries')">
+                    📋 View My Deliveries
+                </button>
+            </div>
+        </div>
+    `;
+}
+
+function testDriverOffer() {
+    // Simulate a driver offer for testing
+    const testOffer = {
+        offer_id: "test-" + Date.now(),
+        delivery_id: "delivery-test-123",
+        order_id: "order-test-456",
+        offer_details: {
+            pickup_address: "37.7749,-122.4194 (Downtown SF)",
+            delivery_address: "37.7933,-122.4417 (Pacific Heights)",
+            estimated_distance_km: 3.2,
+            estimated_payout: 9.80
+        },
+        expires_at: new Date(Date.now() + 120000).toISOString() // 2 minutes from now
+    };
+
+    handleDriverOffer(testOffer);
+}
+
+async function loadDriverDeliveries() {
+    const container = document.getElementById("driver-deliveries-list");
+    if (!container) return;
+
+    container.innerHTML = '<p>Loading deliveries...</p>';
+
+    try {
+        const data = await apiCall("/deliveries");
+        const deliveries = data.deliveries || [];
+
+        if (deliveries.length === 0) {
+            container.innerHTML = `
+                <div class="empty-state">
+                    <h3>No Deliveries Yet</h3>
+                    <p>Your completed deliveries will appear here</p>
+                </div>
+            `;
+            return;
+        }
+
+        container.innerHTML = deliveries.map(delivery => `
+            <div class="order-card" style="margin-bottom: 1rem;">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <div>
+                        <h4>Delivery #${delivery.delivery_id.substring(0, 8)}</h4>
+                        <p style="color: var(--text-light); font-size: 0.9rem;">
+                            Order: ${delivery.order_id?.substring(0, 8)}
+                        </p>
+                    </div>
+                    <span class="badge badge-${delivery.status === 'completed' ? 'success' : 'warning'}">
+                        ${delivery.status}
+                    </span>
+                </div>
+                <p style="margin-top: 0.5rem;">
+                    ${delivery.customer_address || 'N/A'}
+                </p>
+                <p style="color: var(--text-light); font-size: 0.9rem;">
+                    ${new Date(delivery.created_at).toLocaleString()}
+                </p>
+            </div>
+        `).join('');
+
+    } catch (err) {
+        console.error("Error loading deliveries:", err);
+        container.innerHTML = '<p>Failed to load deliveries</p>';
+    }
+}
+
+// ========================================
+// Driver Offer Functions
+// ========================================
+
+// Store current offer data for when driver accepts
+let currentOffer = null;
+
+function handleDriverOffer(data) {
+    console.log("Driver offer received:", data);
+
+    const {
+        offer_id,
+        delivery_id,
+        order_id,
+        offer_details,
+        expires_at
+    } = data;
+
+    // Store offer data for later use
+    currentOffer = {
+        offerId: offer_id,
+        deliveryId: delivery_id,
+        orderId: order_id,
+        pickupAddress: offer_details.pickup_address,
+        deliveryAddress: offer_details.delivery_address,
+        restaurantLat: offer_details.restaurant_lat,
+        restaurantLng: offer_details.restaurant_lng,
+        deliveryLat: offer_details.delivery_lat,
+        deliveryLng: offer_details.delivery_lng,
+        distance: parseFloat(offer_details.estimated_distance_km),
+        payout: parseFloat(offer_details.estimated_payout),
+        expiresAt: expires_at,
+    };
+
+    // Show notification modal
+    showDriverOfferModal(currentOffer);
+
+    // Start countdown timer
+    startOfferCountdown(offer_id, expires_at);
+
+    // Play notification sound (optional)
+    playNotificationSound();
+}
+
+function showDriverOfferModal(offer) {
+    // Remove any existing offer modals
+    const existingModals = document.querySelectorAll('.driver-offer-modal');
+    existingModals.forEach(modal => modal.remove());
+
+    // Create modal UI
+    const modal = document.createElement("div");
+    modal.className = "driver-offer-modal";
+    modal.id = `offer-${offer.offerId}`;
+
+    const pickupAddr = formatAddress(offer.pickupAddress);
+    const deliveryAddr = formatAddress(offer.deliveryAddress);
+
+    modal.innerHTML = `
+        <div class="modal-overlay"></div>
+        <div class="modal-content">
+            <h2>🚗 New Delivery Offer</h2>
+            <div class="offer-details">
+                <p><strong>Pickup:</strong> ${pickupAddr}</p>
+                <p><strong>Delivery:</strong> ${deliveryAddr}</p>
+                <p><strong>Distance:</strong> ${offer.distance.toFixed(1)} km</p>
+                <p><strong>Payout:</strong> $${offer.payout.toFixed(2)}</p>
+                <p class="countdown" id="countdown-${offer.offerId}">Calculating...</p>
+            </div>
+            <div class="offer-actions">
+                <button class="btn-accept" onclick="respondToOffer('${offer.offerId}', 'accept')">
+                    ✓ Accept
+                </button>
+                <button class="btn-reject" onclick="respondToOffer('${offer.offerId}', 'reject')">
+                    ✗ Decline
+                </button>
+            </div>
+        </div>
+    `;
+
+    document.body.appendChild(modal);
+}
+
+async function respondToOffer(offerId, action) {
+    try {
+        const apiBase = window.APP_CONFIG?.API_BASE_URL || "";
+
+        if (!authToken) {
+            showToast("Please log in to respond to offers", "error");
+            return;
+        }
+
+        const response = await fetch(
+            `${apiBase}/deliveries/offers/${offerId}/respond`,
+            {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "Authorization": `Bearer ${authToken}`,
+                },
+                body: JSON.stringify({ action }),
+            }
+        );
+
+        const result = await response.json();
+
+        if (response.ok) {
+            // Remove modal
+            const modal = document.getElementById(`offer-${offerId}`);
+            if (modal) modal.remove();
+
+            // Show success message
+            if (action === "accept") {
+                showToast("Delivery accepted! Loading active delivery...", "success");
+                // Navigate to active delivery page
+                if (currentOffer && currentOffer.deliveryId) {
+                    setTimeout(() => {
+                        showPage("driver-active-delivery");
+                        showActiveDelivery({
+                            delivery_id: currentOffer.deliveryId,
+                            order_id: currentOffer.orderId,
+                        });
+                    }, 500);
+                } else {
+                    // Fallback to dashboard if offer data not available
+                    setTimeout(() => loadDriverDashboard(), 500);
+                }
+            } else {
+                showToast("Offer declined", "info");
+            }
+        } else {
+            showToast(result.error || "Failed to respond to offer", "error");
+        }
+    } catch (error) {
+        console.error("Error responding to offer:", error);
+        showToast("Network error", "error");
+    }
+}
+
+function startOfferCountdown(offerId, expiresAt) {
+    const countdownEl = document.getElementById(`countdown-${offerId}`);
+    if (!countdownEl) return;
+
+    const interval = setInterval(() => {
+        const now = new Date();
+        const expires = new Date(expiresAt);
+        const remaining = Math.max(0, Math.floor((expires - now) / 1000));
+
+        if (remaining <= 0) {
+            clearInterval(interval);
+            countdownEl.textContent = "EXPIRED";
+            countdownEl.classList.add("expired");
+            // Auto-close modal after 2 seconds
+            setTimeout(() => {
+                const modal = document.getElementById(`offer-${offerId}`);
+                if (modal) modal.remove();
+            }, 2000);
+        } else {
+            const minutes = Math.floor(remaining / 60);
+            const seconds = remaining % 60;
+            countdownEl.textContent = `Expires in: ${minutes}:${seconds.toString().padStart(2, '0')}`;
+        }
+    }, 1000);
+}
+
+function playNotificationSound() {
+    // Optional: Add audio notification
+    // Audio file not included, using browser notification instead
+    try {
+        // Use browser notification API (if permission granted)
+        if ("Notification" in window && Notification.permission === "granted") {
+            new Notification("New Delivery Offer", {
+                body: "You have a new delivery offer!",
+            });
+        }
+    } catch (e) {
+        console.log("Notification not available:", e);
+    }
+}
+
+function formatAddress(address) {
+    if (typeof address === 'string') {
+        // If it's a Python dict string representation, try to parse it
+        if (address.startsWith('{') || address.startsWith("{'")) {
+            try {
+                // Try to convert Python dict string to JSON
+                const jsonStr = address.replace(/'/g, '"');
+                const parsed = JSON.parse(jsonStr);
+                if (parsed.address) {
+                    return formatAddress(parsed.address);
+                }
+            } catch (e) {
+                // If parsing fails, check if it contains 'address':
+                const match = address.match(/['"]address['"]\s*:\s*['"]([^'"]+)['"]/);
+                if (match && match[1]) {
+                    return match[1];
+                }
+            }
+        }
+        // If it's a lat,lng string, return a placeholder
+        if (address.match(/^-?\d+\.?\d*,-?\d+\.?\d*$/)) {
+            return `Location (${address})`;
+        }
+        return address;
+    }
+    if (typeof address === 'object' && address !== null) {
+        if (address.address) {
+            return formatAddress(address.address);
+        }
+    }
+    return String(address);
+}
+
+async function showActiveDelivery(acceptanceData) {
+    showPage("driver-active-delivery");
+
+    const container = document.getElementById("active-delivery-content");
+    if (!container) return;
+
+    // Store current delivery info globally
+    window.currentDeliveryData = acceptanceData;
+
+    // Show loading state
+    container.innerHTML = `
+        <div style="padding: 1rem;">
+            <h2>🚗 Active Delivery</h2>
+            <p style="color: var(--text-light);">Loading delivery details...</p>
+        </div>
+    `;
+
+    try {
+        const apiBase = window.APP_CONFIG?.API_BASE_URL || "";
+
+        // Helper function to fetch order with retry (handles timing issues with step functions)
+        const fetchOrderWithRetry = async (orderId, maxRetries = 3, delayMs = 1000) => {
+            for (let attempt = 1; attempt <= maxRetries; attempt++) {
+                try {
+                    console.log(`Fetching order (attempt ${attempt}/${maxRetries}):`, orderId);
+                    const orderResponse = await fetch(
+                        `${apiBase}/orders/${orderId}`,
+                        {
+                            headers: {
+                                "Authorization": `Bearer ${authToken}`,
+                            },
+                        }
+                    );
+
+                    console.log("Order response status:", orderResponse.status);
+
+                    if (orderResponse.ok) {
+                        const data = await orderResponse.json();
+                        console.log("Order data received:", data);
+                        return data.order || data;
+                    }
+
+                    // If forbidden/not found and not last attempt, wait and retry
+                    if ((orderResponse.status === 403 || orderResponse.status === 404) && attempt < maxRetries) {
+                        console.log(`Order not accessible yet, waiting ${delayMs}ms before retry...`);
+                        await new Promise(resolve => setTimeout(resolve, delayMs));
+                        continue;
+                    }
+
+                    // Other errors or last attempt failed
+                    const errorData = await orderResponse.json().catch(() => ({}));
+                    console.error("Order fetch failed:", orderResponse.status, errorData);
+                    throw new Error(`Failed to fetch order: ${errorData.message || errorData.error || orderResponse.status}`);
+                } catch (error) {
+                    if (attempt === maxRetries) {
+                        throw error;
+                    }
+                    console.log(`Error fetching order, retrying... (${error.message})`);
+                    await new Promise(resolve => setTimeout(resolve, delayMs));
+                }
+            }
+        };
+
+        // Fetch the full order data with retry logic (Step Functions may still be updating)
+        const orderData = await fetchOrderWithRetry(acceptanceData.order_id);
+
+        // Store full order data
+        currentOrderData = orderData;
+
+        // Render the UI with actual data
+        // Prefer display addresses (street names) over raw coordinates
+        const restaurantAddr = formatAddress(orderData.restaurant_address_display || orderData.restaurant_location);
+        const deliveryAddr = formatAddress(orderData.delivery_address_display || orderData.delivery_address);
+
+        container.innerHTML = `
+            <div style="padding: 1rem;">
+                <h2>🚗 Active Delivery</h2>
+                <p style="color: var(--text-light);">Navigate to pickup location</p>
+
+                <div style="margin: 1rem 0;">
+                    <div id="driver-delivery-map" style="height: 400px; border-radius: 8px;"></div>
+                </div>
+
+                <div style="background: var(--white); padding: 1rem; border-radius: 8px; margin-top: 1rem;">
+                    <h3 style="margin-top: 0;">Route</h3>
+                    <div style="display: flex; flex-direction: column; gap: 0.5rem;">
+                        <div style="display: flex; align-items: center;">
+                            <span style="margin-right: 0.5rem;">📍</span>
+                            <span>Your Location</span>
+                        </div>
+                        <div style="margin-left: 1rem; border-left: 2px dashed var(--text-light); height: 20px;"></div>
+                        <div style="display: flex; align-items: center;">
+                            <span style="margin-right: 0.5rem;">🏪</span>
+                            <span>Pickup: ${restaurantAddr}</span>
+                        </div>
+                        <div style="margin-left: 1rem; border-left: 2px dashed var(--text-light); height: 20px;"></div>
+                        <div style="display: flex; align-items: center;">
+                            <span style="margin-right: 0.5rem;">🏠</span>
+                            <span>Delivery: ${deliveryAddr}</span>
+                        </div>
+                    </div>
+
+                    <div style="margin-top: 1rem; padding: 1rem; background: var(--light-bg); border-radius: 6px;">
+                        <p><strong>Estimated Time:</strong> <span id="delivery-eta">Calculating...</span></p>
+                    </div>
+                </div>
+
+                <div style="margin-top: 1rem;">
+                    <button class="btn btn-primary btn-full" onclick="completePickup()">
+                        ✓ Picked Up from Restaurant
+                    </button>
+                </div>
+            </div>
+        `;
+
+        // Initialize map with actual order data (reuse customer map logic)
+        setTimeout(() => initDriverDeliveryMap(orderData), 100);
+
+    } catch (error) {
+        console.error("Error loading delivery details:", error);
+        console.error("Error stack:", error.stack);
+        console.error("Acceptance data:", acceptanceData);
+        container.innerHTML = `
+            <div style="padding: 1rem;">
+                <h2>🚗 Active Delivery</h2>
+                <p style="color: var(--error);">Failed to load delivery details</p>
+                <p style="color: var(--text-light); font-size: 0.9rem; margin-top: 0.5rem;">Error: ${error.message}</p>
+                <button class="btn btn-secondary" onclick="loadDriverDashboard()">Back to Dashboard</button>
+            </div>
+        `;
+    }
+}
+
+// Store driver-specific map and markers
+let driverDeliveryMap = null;
+let driverRestaurantMarker = null;
+let driverDestinationMarker = null;
+let driverDriverMarker = null;
+let driverRouteLine = null;
+
+function initDriverDeliveryMap(orderData) {
+    const mapDiv = document.getElementById("driver-delivery-map");
+    if (!mapDiv) return;
+
+    // Clean up old map and markers if they exist
+    if (driverDeliveryMap) {
+        driverDeliveryMap.remove();
+        driverDeliveryMap = null;
+    }
+    driverRestaurantMarker = null;
+    driverDestinationMarker = null;
+    driverDriverMarker = null;
+    driverRouteLine = null;
+
+    // Parse locations from order data (same as customer map)
+    const restaurantLoc = parseLocation(orderData.restaurant_location, { lat: 37.7849, lng: -122.4094 });
+    const deliveryLoc = parseLocation(orderData.delivery_address, { lat: 37.7749, lng: -122.4194 });
+    const driverLoc = orderData.driver_location ? parseLocation(orderData.driver_location) : null;
+
+    // Initialize fresh map
+    driverDeliveryMap = L.map(mapDiv).setView([restaurantLoc.lat, restaurantLoc.lng], 13);
+
+    // Add OpenStreetMap tiles
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+        maxZoom: 19,
+    }).addTo(driverDeliveryMap);
+
+    // Add restaurant marker
+    if (restaurantLoc) {
+        driverRestaurantMarker = L.marker([restaurantLoc.lat, restaurantLoc.lng], {
+            icon: L.divIcon({
+                className: "restaurant-marker",
+                html: '<div style="background: #457b9d; color: white; padding: 10px; border-radius: 50%; width: 45px; height: 45px; display: flex; align-items: center; justify-content: center; font-size: 22px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); border: 3px solid white;">🍽️</div>',
+                iconSize: [45, 45],
+                iconAnchor: [22.5, 22.5],
+            }),
+        }).addTo(driverDeliveryMap);
+        driverRestaurantMarker.bindPopup("<b>Restaurant</b><br>Pickup location");
+    }
+
+    // Add destination marker
+    if (deliveryLoc) {
+        driverDestinationMarker = L.marker([deliveryLoc.lat, deliveryLoc.lng], {
+            icon: L.divIcon({
+                className: "destination-marker",
+                html: '<div style="background: #2d6a4f; color: white; padding: 10px; border-radius: 50%; width: 45px; height: 45px; display: flex; align-items: center; justify-content: center; font-size: 22px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); border: 3px solid white;">🏠</div>',
+                iconSize: [45, 45],
+                iconAnchor: [22.5, 22.5],
+            }),
+        }).addTo(driverDeliveryMap);
+        driverDestinationMarker.bindPopup("<b>Customer</b><br>Delivery location");
+    }
+
+    // Add driver marker if available (or use default location)
+    const driverPosition = driverLoc || { lat: 37.7749, lng: -122.4194 }; // Default if not available
+    driverDriverMarker = L.marker([driverPosition.lat, driverPosition.lng], {
+        icon: L.divIcon({
+            className: "driver-marker",
+            html: '<div style="background: #e63946; color: white; padding: 10px; border-radius: 50%; width: 45px; height: 45px; display: flex; align-items: center; justify-content: center; font-size: 22px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); border: 3px solid white;">🚗</div>',
+            iconSize: [45, 45],
+            iconAnchor: [22.5, 22.5],
+        }),
+    }).addTo(driverDeliveryMap);
+    driverDriverMarker.bindPopup("<b>You</b><br>Your location");
+
+    // Draw route line
+    const points = [
+        [driverPosition.lat, driverPosition.lng],
+        [restaurantLoc.lat, restaurantLoc.lng],
+        [deliveryLoc.lat, deliveryLoc.lng]
+    ];
+    driverRouteLine = L.polyline(points, {
+        color: '#e63946',
+        weight: 4,
+        opacity: 0.7,
+    }).addTo(driverDeliveryMap);
+
+    // Fit map to show all markers
+    const bounds = L.latLngBounds([
+        [driverPosition.lat, driverPosition.lng],
+        [restaurantLoc.lat, restaurantLoc.lng],
+        [deliveryLoc.lat, deliveryLoc.lng]
+    ]);
+    driverDeliveryMap.fitBounds(bounds, { padding: [50, 50] });
+
+    // Calculate and display ETA
+    const totalDistance = calculateDistance([driverPosition.lat, driverPosition.lng], [restaurantLoc.lat, restaurantLoc.lng]) +
+                         calculateDistance([restaurantLoc.lat, restaurantLoc.lng], [deliveryLoc.lat, deliveryLoc.lng]);
+    const etaMinutes = Math.ceil(totalDistance * 2); // Assuming 30 km/h average speed
+    const etaElement = document.getElementById("delivery-eta");
+    if (etaElement) {
+        etaElement.textContent = `${etaMinutes} minutes`;
+    }
+}
+
+function calculateDistance(loc1, loc2) {
+    // Haversine formula for distance in km
+    const R = 6371;
+    const dLat = (loc2[0] - loc1[0]) * Math.PI / 180;
+    const dLon = (loc2[1] - loc1[1]) * Math.PI / 180;
+    const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+              Math.cos(loc1[0] * Math.PI / 180) * Math.cos(loc2[0] * Math.PI / 180) *
+              Math.sin(dLon/2) * Math.sin(dLon/2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    return R * c;
+}
+
+async function completePickup() {
+    if (!currentOffer || !currentOffer.deliveryId) {
+        showToast("Error: Delivery information not available", "error");
+        return;
+    }
+
+    try {
+        const apiBase = window.APP_CONFIG?.API_BASE_URL || "";
+        const response = await fetch(
+            `${apiBase}/deliveries/${currentOffer.deliveryId}/pickup`,
+            {
+                method: "PATCH",
+                headers: {
+                    "Authorization": `Bearer ${authToken}`,
+                },
+            }
+        );
+
+        if (response.ok) {
+            showToast("Marked as picked up! Navigate to customer.", "success");
+            // Update UI to show delivery phase
+            const button = document.querySelector("#active-delivery-content button");
+            if (button) {
+                button.textContent = "✓ Delivered to Customer";
+                button.onclick = completeDelivery;
+            }
+        } else {
+            const result = await response.json();
+            showToast(result.error || "Failed to mark as picked up", "error");
+        }
+    } catch (error) {
+        console.error("Error marking pickup:", error);
+        showToast("Network error", "error");
+    }
+}
+
+async function completeDelivery() {
+    if (!currentOffer || !currentOffer.deliveryId) {
+        showToast("Error: Delivery information not available", "error");
+        return;
+    }
+
+    try {
+        const apiBase = window.APP_CONFIG?.API_BASE_URL || "";
+        const response = await fetch(
+            `${apiBase}/deliveries/${currentOffer.deliveryId}/complete`,
+            {
+                method: "PATCH",
+                headers: {
+                    "Authorization": `Bearer ${authToken}`,
+                },
+            }
+        );
+
+        if (response.ok) {
+            showToast("Delivery completed! Great job!", "success");
+            // Clear current offer
+            currentOffer = null;
+            setTimeout(() => {
+                showPage("driver-dashboard");
+                loadDriverDashboard();
+            }, 1500);
+        } else {
+            const result = await response.json();
+            showToast(result.error || "Failed to mark as completed", "error");
+        }
+    } catch (error) {
+        console.error("Error marking completion:", error);
+        showToast("Network error", "error");
+    }
+}
+
+// ========================================
+// Profile Functions
+// ========================================
+
+async function loadProfile() {
+    if (!authToken || !currentUser) {
+        showToast("Please log in first", "error");
+        showPage("login");
+        return;
+    }
+
+    // Pre-fill email
+    document.getElementById("profile-email").value = currentUser.email || "";
+
+    // For debugging: show user ID
+    console.log("User ID (for driver assignment):", currentUser.sub);
+
+    // Show/hide fields based on role
+    const isDriver = currentUser.role === 'driver';
+    document.getElementById("customer-fields").style.display = isDriver ? 'none' : 'block';
+    document.getElementById("driver-fields").style.display = isDriver ? 'block' : 'none';
+
+    try {
+        if (isDriver) {
+            // Load driver profile
+            try {
+                const data = await apiCall(`/drivers/${currentUser.sub}`);
+                if (data) {
+                    document.getElementById("profile-name").value = data.name || "";
+                    document.getElementById("profile-phone").value = data.phone || "";
+                    document.getElementById("profile-vehicle-type").value = data.vehicle_type || "car";
+                    document.getElementById("profile-license-plate").value = data.license_plate || "";
+                    document.getElementById("profile-license-number").value = data.license_number || "";
+                }
+            } catch (driverErr) {
+                // Driver profile doesn't exist yet, that's okay
+                console.log("Driver profile not found, will be created on save");
+            }
+        } else {
+            // Load customer profile
+            const response = await apiCall(`/users/me`);
+            if (response && response.user) {
+                const data = response.user;
+                document.getElementById("profile-name").value = data.full_name || data.name || "";
+                document.getElementById("profile-phone").value = data.phone || "";
+                document.getElementById("profile-address").value = data.address || "";
+            }
+        }
+    } catch (err) {
+        console.error("Error loading profile:", err);
+        // Continue anyway, user can fill in the form
+    }
+}
+
+async function saveProfile(e) {
+    e.preventDefault();
+
+    const name = document.getElementById("profile-name").value;
+    const phone = document.getElementById("profile-phone").value;
+    const isDriver = currentUser.role === 'driver';
+
+    try {
+        if (isDriver) {
+            // Save driver profile
+            const vehicleType = document.getElementById("profile-vehicle-type").value;
+            const licensePlate = document.getElementById("profile-license-plate").value;
+            const licenseNumber = document.getElementById("profile-license-number").value;
+
+            // Try to get current GPS location
+            let driverLocation = {
+                lat: 37.7749,
+                lng: -122.4194
+            };
+
+            if (navigator.geolocation) {
+                try {
+                    const position = await new Promise((resolve, reject) => {
+                        navigator.geolocation.getCurrentPosition(resolve, reject, {
+                            timeout: 5000,
+                            enableHighAccuracy: false
+                        });
+                    });
+                    driverLocation = {
+                        lat: position.coords.latitude,
+                        lng: position.coords.longitude
+                    };
+                    console.log("Using GPS location:", driverLocation);
+                } catch (gpsErr) {
+                    console.log("GPS not available, using default location:", gpsErr.message);
+                }
+            }
+
+            const driverData = {
+                name: name,
+                phone: phone,
+                vehicle_type: vehicleType,
+                license_plate: licensePlate,
+                license_number: licenseNumber,
+                location: driverLocation,
+                status: "available"
+            };
+
+            // Backend handles upsert automatically
+            const result = await apiCall(`/drivers/${currentUser.sub}`, "PUT", driverData);
+
+            if (result) {
+                showToast("Driver profile saved successfully!", "success");
+                currentUser.name = name;
+                document.getElementById("user-name").textContent = name || currentUser.email;
+                // Refresh dashboard to show updated status
+                if (document.getElementById("page-driver-dashboard").classList.contains("active")) {
+                    setTimeout(() => loadDriverDashboard(), 500);
+                }
+            }
+        } else {
+            // Save customer profile
+            const address = document.getElementById("profile-address").value;
+
+            // Geocode the address to get coordinates
+            let location = null;
+            if (address) {
+                const geocodeUrl = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(address)}`;
+                const geocodeResponse = await fetch(geocodeUrl);
+                const geocodeData = await geocodeResponse.json();
+
+                if (geocodeData && geocodeData.length > 0) {
+                    location = `${geocodeData[0].lat},${geocodeData[0].lon}`;
+                    console.log("Geocoded address:", location);
+                }
+            }
+
+            const updateData = {
+                full_name: name,
+                phone: phone,
+                address: address,
+                location: location
+            };
+
+            const result = await apiCall(`/users/${currentUser.sub}`, "PUT", updateData);
+
+            if (result) {
+                showToast("Profile saved successfully!", "success");
+                currentUser.name = name;
+                document.getElementById("user-name").textContent = name || currentUser.email;
+            }
+        }
+    } catch (err) {
+        console.error("Error saving profile:", err);
+        showToast("Failed to save profile", "error");
+    }
+}
+
 // init
 document.addEventListener("DOMContentLoaded", () => {
+    // Restore session from localStorage
+    const savedAuthToken = localStorage.getItem("authToken");
+    const savedUser = localStorage.getItem("currentUser");
+
+    if (savedAuthToken && savedUser) {
+        try {
+            authToken = savedAuthToken;
+            currentUser = JSON.parse(savedUser);
+
+            // Update UI to logged-in state
+            document.getElementById("nav-auth").classList.add("hidden");
+            document.getElementById("nav-user").classList.remove("hidden");
+            document.getElementById("user-name").textContent = currentUser?.name || currentUser?.email || "User";
+
+            // Connect WebSocket
+            connectWebSocket();
+
+            // Show appropriate interface based on role
+            if (currentUser?.role === 'driver') {
+                showDriverInterface();
+            } else {
+                // Load cart for customers
+                loadCartFromServer();
+            }
+
+            console.log("Session restored for:", currentUser?.email);
+        } catch (e) {
+            console.error("Failed to restore session:", e);
+            // Clear invalid data
+            localStorage.removeItem("authToken");
+            localStorage.removeItem("currentUser");
+        }
+    }
+
+    // Check URL hash to restore page
+    const hash = window.location.hash.replace('#', '');
+    if (hash && document.getElementById(`page-${hash}`)) {
+        // Don't call showPage if we're already on that page (avoid redundant navigation)
+        const currentActivePage = document.querySelector(".page.active");
+        if (!currentActivePage || currentActivePage.id !== `page-${hash}`) {
+            showPage(hash);
+
+            // Special handling for tracking page - restore the tracked order
+            if (hash === 'tracking') {
+                const trackedOrderId = localStorage.getItem("currentTrackedOrderId");
+                if (trackedOrderId && authToken) {
+                    // Small delay to ensure page is shown first
+                    setTimeout(() => trackOrder(trackedOrderId), 100);
+                }
+            }
+        }
+    } else if (!hash) {
+        // No hash means home page - ensure home is active
+        showPage('home');
+    }
+
     loadPopularRestaurants();
 });

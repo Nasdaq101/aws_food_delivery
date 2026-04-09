@@ -3,9 +3,11 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' https://images.unsplash.com data:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' https://*.amazonaws.com;">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' https://images.unsplash.com https://*.tile.openstreetmap.org data:; script-src 'self' 'unsafe-inline' https://unpkg.com; style-src 'self' 'unsafe-inline' https://unpkg.com; connect-src 'self' https://*.amazonaws.com wss://*.amazonaws.com https://unpkg.com https://nominatim.openstreetmap.org;">
     <title>QuickBite - Food Delivery</title>
     <link rel="stylesheet" href="css/style.css">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 </head>
 <body>
     <!-- Navigation -->
@@ -23,6 +25,7 @@
         </div>
         <div class="nav-user hidden" id="nav-user">
             <span id="user-name"></span>
+            <a href="#" onclick="showPage('profile')" style="margin-right: 1rem; color: var(--text-light);">👤 Profile</a>
             <button class="btn btn-outline" onclick="logout()">Logout</button>
         </div>
     </nav>
@@ -108,11 +111,35 @@
             </div>
         </section>
 
-        <!-- Order Tracking -->
+        <!-- Order Details & Tracking -->
         <section id="page-tracking" class="page">
             <div class="section">
-                <h2>Order Tracking</h2>
+                <button class="btn btn-outline" onclick="showPage('orders')" style="margin-bottom: 1rem;">← Back to Orders</button>
                 <div id="tracking-info"></div>
+
+                <!-- Map Legend -->
+                <div id="map-legend" style="display: none; background: var(--white); padding: 1rem; border-radius: var(--radius); box-shadow: var(--shadow); margin: 1rem 0;">
+                    <h4 style="margin: 0 0 0.75rem 0; font-size: 0.95rem;">Map Legend</h4>
+                    <div style="display: flex; gap: 2rem; flex-wrap: wrap;">
+                        <div style="display: flex; align-items: center; gap: 0.5rem;">
+                            <span style="font-size: 1.5rem;">🍽️</span>
+                            <span style="font-size: 0.9rem;">Restaurant</span>
+                        </div>
+                        <div style="display: flex; align-items: center; gap: 0.5rem;">
+                            <span style="font-size: 1.5rem;">🚗</span>
+                            <span style="font-size: 0.9rem;">Driver</span>
+                        </div>
+                        <div style="display: flex; align-items: center; gap: 0.5rem;">
+                            <span style="font-size: 1.5rem;">🏠</span>
+                            <span style="font-size: 0.9rem;">Your Location</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Live Map -->
+                <div id="tracking-map" style="height: 450px; margin: 1rem 0; border-radius: var(--radius); overflow: hidden; box-shadow: var(--shadow); display: none;"></div>
+
+                <!-- Tracking Status Timeline -->
                 <div id="tracking-status" class="tracking-timeline"></div>
             </div>
         </section>
@@ -159,6 +186,93 @@
                     <button type="submit" class="btn btn-primary btn-full">Verify Email</button>
                 </form>
                 <p><a href="#" onclick="showPage('login')">Back to Login</a></p>
+            </div>
+        </section>
+
+        <!-- Driver Dashboard -->
+        <section id="page-driver-dashboard" class="page">
+            <div class="section">
+                <div id="driver-dashboard-content">
+                    <!-- Populated by loadDriverDashboard() in JS -->
+                </div>
+            </div>
+        </section>
+
+        <!-- Driver Deliveries -->
+        <section id="page-driver-deliveries" class="page">
+            <div class="section">
+                <button class="btn btn-outline" onclick="showPage('driver-dashboard')" style="margin-bottom: 1rem;">← Back to Dashboard</button>
+                <h2>My Deliveries</h2>
+                <div id="driver-deliveries-list">
+                    <!-- Populated by loadDriverDeliveries() in JS -->
+                </div>
+            </div>
+        </section>
+
+        <!-- Active Delivery (Driver) -->
+        <section id="page-driver-active-delivery" class="page">
+            <div class="section">
+                <div id="active-delivery-content">
+                    <!-- Populated by showActiveDelivery() in JS -->
+                </div>
+            </div>
+        </section>
+
+        <!-- Profile -->
+        <section id="page-profile" class="page">
+            <div class="section">
+                <h2>My Profile</h2>
+                <div style="max-width: 500px; margin: 2rem auto;">
+                    <form onsubmit="saveProfile(event)" id="profile-form">
+                        <!-- Common fields -->
+                        <div style="margin-bottom: 1rem;">
+                            <label>Name</label>
+                            <input type="text" id="profile-name" placeholder="Your name" required>
+                        </div>
+                        <div style="margin-bottom: 1rem;">
+                            <label>Email</label>
+                            <input type="email" id="profile-email" readonly style="background: var(--light-bg);">
+                        </div>
+                        <div style="margin-bottom: 1rem;">
+                            <label>Phone</label>
+                            <input type="tel" id="profile-phone" placeholder="+1-555-0100">
+                        </div>
+
+                        <!-- Customer-specific fields -->
+                        <div id="customer-fields" style="display: none;">
+                            <div style="margin-bottom: 1rem;">
+                                <label>Home Address</label>
+                                <input type="text" id="profile-address" placeholder="123 Main St, San Francisco, CA 94102">
+                                <p style="color: var(--text-light); font-size: 0.9rem; margin-top: 0.5rem;">
+                                    This will be used as your default delivery address
+                                </p>
+                            </div>
+                        </div>
+
+                        <!-- Driver-specific fields -->
+                        <div id="driver-fields" style="display: none;">
+                            <div style="margin-bottom: 1rem;">
+                                <label>Vehicle Type</label>
+                                <select id="profile-vehicle-type">
+                                    <option value="car">Car</option>
+                                    <option value="bike">Bike</option>
+                                    <option value="scooter">Scooter</option>
+                                    <option value="motorcycle">Motorcycle</option>
+                                </select>
+                            </div>
+                            <div style="margin-bottom: 1rem;">
+                                <label>License Plate</label>
+                                <input type="text" id="profile-license-plate" placeholder="ABC-1234">
+                            </div>
+                            <div style="margin-bottom: 1rem;">
+                                <label>Driver's License Number</label>
+                                <input type="text" id="profile-license-number" placeholder="D1234567">
+                            </div>
+                        </div>
+
+                        <button type="submit" class="btn btn-primary btn-full">Save Profile</button>
+                    </form>
+                </div>
             </div>
         </section>
     </main>

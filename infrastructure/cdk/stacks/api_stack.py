@@ -3,7 +3,6 @@ from aws_cdk import (
     CfnOutput,
     CustomResource,
     aws_apigateway as apigw,
-    aws_apigatewayv2 as apigwv2,
     aws_s3_deployment as s3deploy,
     aws_lambda as _lambda,
     aws_iam as iam,
@@ -17,6 +16,10 @@ import json
 class ApiStack(Stack):
     def __init__(self, scope: Construct, construct_id: str, compute_stack, auth_stack, storage_stack, **kwargs):
         super().__init__(scope, construct_id, **kwargs)
+
+        # Import WebSocket URL from CloudFormation export
+        from aws_cdk import Fn
+        ws_url = Fn.import_value("FoodDeliveryWebSocketUrl")
 
         fns = compute_stack.functions
 
@@ -99,6 +102,20 @@ class ApiStack(Stack):
         delivery_by_id = deliveries.add_resource("{delivery_id}")
         delivery_by_id.add_method("GET", apigw.LambdaIntegration(fns["delivery-service"]), authorizer=authorizer, authorization_type=apigw.AuthorizationType.COGNITO)
 
+        # /deliveries/{delivery_id}/pickup
+        pickup = delivery_by_id.add_resource("pickup")
+        pickup.add_method("PATCH", apigw.LambdaIntegration(fns["delivery-service"]), authorizer=authorizer, authorization_type=apigw.AuthorizationType.COGNITO)
+
+        # /deliveries/{delivery_id}/complete
+        complete = delivery_by_id.add_resource("complete")
+        complete.add_method("PATCH", apigw.LambdaIntegration(fns["delivery-service"]), authorizer=authorizer, authorization_type=apigw.AuthorizationType.COGNITO)
+
+        # /deliveries/offers/{offer_id}/respond
+        offers = deliveries.add_resource("offers")
+        offer_by_id = offers.add_resource("{offer_id}")
+        respond = offer_by_id.add_resource("respond")
+        respond.add_method("POST", apigw.LambdaIntegration(fns["delivery-service"]), authorizer=authorizer, authorization_type=apigw.AuthorizationType.COGNITO)
+
         # /drivers
         drivers = self.api.root.add_resource("drivers")
         drivers.add_method("POST", apigw.LambdaIntegration(fns["driver-service"]), authorizer=authorizer, authorization_type=apigw.AuthorizationType.COGNITO)
@@ -126,14 +143,6 @@ class ApiStack(Stack):
         admin.add_resource("dashboard").add_method("GET", apigw.LambdaIntegration(fns["admin-service"]), authorizer=authorizer, authorization_type=apigw.AuthorizationType.COGNITO)
         admin.add_resource("users").add_method("GET", apigw.LambdaIntegration(fns["admin-service"]), authorizer=authorizer, authorization_type=apigw.AuthorizationType.COGNITO)
         admin.add_resource("orders").add_method("GET", apigw.LambdaIntegration(fns["admin-service"]), authorizer=authorizer, authorization_type=apigw.AuthorizationType.COGNITO)
-
-        # ── WebSocket API (for real-time tracking) ──
-        self.ws_api = apigwv2.CfnApi(
-            self, "TrackingWebSocketApi",
-            name="FoodDelivery-TrackingWS",
-            protocol_type="WEBSOCKET",
-            route_selection_expression="$request.body.action",
-        )
 
         # ── Outputs ──
         CfnOutput(
@@ -171,6 +180,7 @@ class ApiStack(Stack):
 
 window.APP_CONFIG = {{
     API_BASE_URL: "{self.api.url.rstrip('/')}",
+    WEBSOCKET_URL: "{ws_url}",
     COGNITO_USER_POOL_ID: "{auth_stack.user_pool.user_pool_id}",
     COGNITO_CLIENT_ID: "{auth_stack.user_pool_client.user_pool_client_id}",
     COGNITO_REGION: "{self.region}"
@@ -215,6 +225,8 @@ def handler(event, context):
         storage_stack.frontend_bucket.grant_write(config_writer)
 
         # Custom resource to trigger the Lambda
+        # Include a timestamp to force regeneration on every deployment
+        import time
         config_custom_resource = CustomResource(
             self, "FrontendConfigResource",
             service_token=config_writer.function_arn,
@@ -222,6 +234,7 @@ def handler(event, context):
                 'Bucket': storage_stack.frontend_bucket.bucket_name,
                 'Key': 'js/config.js',
                 'Content': config_content,
+                'Timestamp': str(int(time.time())),  # Force update on every deploy
             }
         )
 
