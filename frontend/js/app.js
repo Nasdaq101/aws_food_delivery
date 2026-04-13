@@ -2272,6 +2272,20 @@ async function loadProfile() {
     document.getElementById("customer-fields").style.display = isDriver ? 'none' : 'block';
     document.getElementById("driver-fields").style.display = isDriver ? 'block' : 'none';
 
+    // Update profile header
+    const roleBadge = document.getElementById("profile-role-badge");
+    const avatarIcon = document.getElementById("profile-avatar-icon");
+
+    if (isDriver) {
+        roleBadge.textContent = "Driver";
+        roleBadge.style.background = "rgba(69, 123, 157, 0.9)";
+        avatarIcon.textContent = "🚗";
+    } else {
+        roleBadge.textContent = "Customer";
+        roleBadge.style.background = "rgba(255, 255, 255, 0.2)";
+        avatarIcon.textContent = "👤";
+    }
+
     try {
         if (isDriver) {
             // Load driver profile
@@ -2283,10 +2297,14 @@ async function loadProfile() {
                     document.getElementById("profile-vehicle-type").value = data.vehicle_type || "car";
                     document.getElementById("profile-license-plate").value = data.license_plate || "";
                     document.getElementById("profile-license-number").value = data.license_number || "";
+
+                    // Update header name
+                    document.getElementById("profile-header-name").textContent = data.name || "Driver Profile";
                 }
             } catch (driverErr) {
                 // Driver profile doesn't exist yet, that's okay
                 console.log("Driver profile not found, will be created on save");
+                document.getElementById("profile-header-name").textContent = "Driver Profile";
             }
         } else {
             // Load customer profile
@@ -2296,11 +2314,15 @@ async function loadProfile() {
                 document.getElementById("profile-name").value = data.full_name || data.name || "";
                 document.getElementById("profile-phone").value = data.phone || "";
                 document.getElementById("profile-address").value = data.address || "";
+
+                // Update header name
+                document.getElementById("profile-header-name").textContent = data.full_name || data.name || "My Profile";
             }
         }
     } catch (err) {
         console.error("Error loading profile:", err);
         // Continue anyway, user can fill in the form
+        document.getElementById("profile-header-name").textContent = isDriver ? "Driver Profile" : "My Profile";
     }
 }
 
@@ -2359,6 +2381,7 @@ async function saveProfile(e) {
                 showToast("Driver profile saved successfully!", "success");
                 currentUser.name = name;
                 document.getElementById("user-name").textContent = name || currentUser.email;
+                document.getElementById("profile-header-name").textContent = name || "Driver Profile";
                 // Refresh dashboard to show updated status
                 if (document.getElementById("page-driver-dashboard").classList.contains("active")) {
                     setTimeout(() => loadDriverDashboard(), 500);
@@ -2394,6 +2417,7 @@ async function saveProfile(e) {
                 showToast("Profile saved successfully!", "success");
                 currentUser.name = name;
                 document.getElementById("user-name").textContent = name || currentUser.email;
+                document.getElementById("profile-header-name").textContent = name || "My Profile";
             }
         }
     } catch (err) {

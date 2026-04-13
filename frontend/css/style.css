@@ -67,6 +67,15 @@ body {
     gap: 0.75rem;
 }
 
+.nav-user-name {
+    font-weight: 600;
+    color: var(--text);
+    padding: 0.5rem 1rem;
+    background: var(--bg);
+    border-radius: var(--radius);
+    margin-right: 0.25rem;
+}
+
 .btn {
     padding: 0.5rem 1.25rem;
     border: none;
@@ -104,6 +113,36 @@ body {
 
 .btn-full {
     width: 100%;
+}
+
+.btn-profile {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    background: linear-gradient(135deg, var(--primary) 0%, var(--primary-dark) 100%);
+    color: var(--white);
+    padding: 0.5rem 1rem;
+    border-radius: var(--radius);
+    font-weight: 600;
+    transition: all 0.3s ease;
+    box-shadow: 0 2px 6px rgba(230, 57, 70, 0.2);
+}
+
+.btn-profile:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(230, 57, 70, 0.3);
+}
+
+.btn-profile .profile-icon {
+    font-size: 1.1rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    background: rgba(255, 255, 255, 0.2);
+    border-radius: 50%;
+    backdrop-filter: blur(10px);
 }
 
 .page {
@@ -674,5 +713,230 @@ body {
     .driver-offer-modal .btn-accept,
     .driver-offer-modal .btn-reject {
         padding: 0.875rem;
+    }
+}
+
+/* ========================================
+   Profile Page Styles
+   ======================================== */
+
+.profile-container {
+    max-width: 800px;
+    margin: 0 auto;
+}
+
+.profile-header {
+    display: flex;
+    align-items: center;
+    gap: 1.5rem;
+    padding: 2rem;
+    background: linear-gradient(135deg, var(--primary) 0%, var(--primary-dark) 100%);
+    border-radius: var(--radius);
+    margin-bottom: 2rem;
+    box-shadow: var(--shadow);
+}
+
+.profile-avatar {
+    width: 80px;
+    height: 80px;
+    border-radius: 50%;
+    background: var(--white);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 2.5rem;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+.profile-header-info {
+    flex: 1;
+}
+
+.profile-header-info h2 {
+    color: var(--white);
+    margin: 0 0 0.5rem 0;
+    font-size: 1.75rem;
+}
+
+.profile-role-badge {
+    display: inline-block;
+    padding: 0.35rem 1rem;
+    background: rgba(255, 255, 255, 0.2);
+    color: var(--white);
+    border-radius: 20px;
+    font-size: 0.85rem;
+    font-weight: 600;
+    backdrop-filter: blur(10px);
+}
+
+.profile-card {
+    background: var(--white);
+    border-radius: var(--radius);
+    padding: 1.75rem;
+    margin-bottom: 1.5rem;
+    box-shadow: var(--shadow);
+    transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.profile-card:hover {
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+}
+
+.profile-card-title {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin: 0 0 1.5rem 0;
+    color: var(--text);
+    font-size: 1.15rem;
+    font-weight: 600;
+    padding-bottom: 1rem;
+    border-bottom: 2px solid var(--bg);
+}
+
+.profile-card-icon {
+    font-size: 1.35rem;
+}
+
+.profile-form-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+    gap: 1.25rem;
+}
+
+.profile-form-group {
+    display: flex;
+    flex-direction: column;
+}
+
+.profile-form-group.full-width {
+    grid-column: 1 / -1;
+}
+
+.profile-label {
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 0.5rem;
+    font-size: 0.9rem;
+    display: block;
+}
+
+.profile-input {
+    width: 100%;
+    padding: 0.75rem 1rem;
+    border: 2px solid var(--border);
+    border-radius: var(--radius);
+    font-size: 0.95rem;
+    transition: all 0.2s;
+    background: var(--white);
+}
+
+.profile-input:focus {
+    outline: none;
+    border-color: var(--primary);
+    box-shadow: 0 0 0 3px rgba(230, 57, 70, 0.1);
+}
+
+.profile-input.readonly {
+    background: var(--bg);
+    color: var(--text-light);
+    cursor: not-allowed;
+}
+
+.profile-input::placeholder {
+    color: var(--text-light);
+    opacity: 0.6;
+}
+
+.profile-hint {
+    color: var(--text-light);
+    font-size: 0.85rem;
+    margin-top: 0.5rem;
+    line-height: 1.4;
+}
+
+.profile-actions {
+    display: flex;
+    justify-content: center;
+    margin-top: 2rem;
+}
+
+.btn-large {
+    padding: 0.875rem 2.5rem;
+    font-size: 1rem;
+    font-weight: 600;
+}
+
+/* Driver-specific profile enhancements */
+#driver-fields .profile-card {
+    border-left: 4px solid var(--secondary);
+}
+
+/* Customer-specific profile enhancements */
+#customer-fields .profile-card {
+    border-left: 4px solid var(--primary);
+}
+
+/* Responsive adjustments for profile */
+@media (max-width: 768px) {
+    .profile-header {
+        flex-direction: column;
+        text-align: center;
+        padding: 1.5rem;
+    }
+
+    .profile-avatar {
+        width: 70px;
+        height: 70px;
+        font-size: 2rem;
+    }
+
+    .profile-header-info h2 {
+        font-size: 1.5rem;
+    }
+
+    .profile-card {
+        padding: 1.25rem;
+    }
+
+    .profile-form-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .btn-large {
+        width: 100%;
+    }
+}
+
+@media (max-width: 480px) {
+    .profile-container {
+        padding: 0;
+    }
+
+    .profile-header {
+        border-radius: 0;
+        margin-bottom: 1rem;
+    }
+
+    .profile-card {
+        border-radius: var(--radius);
+        margin-bottom: 1rem;
+    }
+}
+
+/* Navigation responsive design */
+@media (max-width: 768px) {
+    .nav-user-name {
+        display: none;
+    }
+
+    .btn-profile span:not(.profile-icon) {
+        display: none;
+    }
+
+    .btn-profile {
+        padding: 0.5rem;
+        min-width: 40px;
+        justify-content: center;
     }
 }
