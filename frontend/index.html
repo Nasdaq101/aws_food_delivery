@@ -24,8 +24,11 @@
             <button class="btn btn-primary" onclick="showPage('signup')">Sign Up</button>
         </div>
         <div class="nav-user hidden" id="nav-user">
-            <span id="user-name"></span>
-            <a href="#" onclick="showPage('profile')" style="margin-right: 1rem; color: var(--text-light);">👤 Profile</a>
+            <span id="user-name" class="nav-user-name"></span>
+            <button class="btn btn-profile" onclick="showPage('profile')">
+                <span class="profile-icon">👤</span>
+                <span>Profile</span>
+            </button>
             <button class="btn btn-outline" onclick="logout()">Logout</button>
         </div>
     </nav>
@@ -221,56 +224,94 @@
         <!-- Profile -->
         <section id="page-profile" class="page">
             <div class="section">
-                <h2>My Profile</h2>
-                <div style="max-width: 500px; margin: 2rem auto;">
+                <div class="profile-container">
+                    <!-- Profile Header -->
+                    <div class="profile-header">
+                        <div class="profile-avatar">
+                            <span id="profile-avatar-icon">👤</span>
+                        </div>
+                        <div class="profile-header-info">
+                            <h2 id="profile-header-name">My Profile</h2>
+                            <span class="profile-role-badge" id="profile-role-badge">Customer</span>
+                        </div>
+                    </div>
+
+                    <!-- Profile Form -->
                     <form onsubmit="saveProfile(event)" id="profile-form">
-                        <!-- Common fields -->
-                        <div style="margin-bottom: 1rem;">
-                            <label>Name</label>
-                            <input type="text" id="profile-name" placeholder="Your name" required>
-                        </div>
-                        <div style="margin-bottom: 1rem;">
-                            <label>Email</label>
-                            <input type="email" id="profile-email" readonly style="background: var(--light-bg);">
-                        </div>
-                        <div style="margin-bottom: 1rem;">
-                            <label>Phone</label>
-                            <input type="tel" id="profile-phone" placeholder="+1-555-0100">
+                        <!-- Basic Information Card -->
+                        <div class="profile-card">
+                            <h3 class="profile-card-title">
+                                <span class="profile-card-icon">ℹ️</span>
+                                Basic Information
+                            </h3>
+                            <div class="profile-form-grid">
+                                <div class="profile-form-group">
+                                    <label class="profile-label">Full Name</label>
+                                    <input type="text" id="profile-name" class="profile-input" placeholder="Your name" required>
+                                </div>
+                                <div class="profile-form-group">
+                                    <label class="profile-label">Email Address</label>
+                                    <input type="email" id="profile-email" class="profile-input readonly" readonly>
+                                </div>
+                                <div class="profile-form-group">
+                                    <label class="profile-label">Phone Number</label>
+                                    <input type="tel" id="profile-phone" class="profile-input" placeholder="+1-555-0100">
+                                </div>
+                            </div>
                         </div>
 
                         <!-- Customer-specific fields -->
                         <div id="customer-fields" style="display: none;">
-                            <div style="margin-bottom: 1rem;">
-                                <label>Home Address</label>
-                                <input type="text" id="profile-address" placeholder="123 Main St, San Francisco, CA 94102">
-                                <p style="color: var(--text-light); font-size: 0.9rem; margin-top: 0.5rem;">
-                                    This will be used as your default delivery address
-                                </p>
+                            <div class="profile-card">
+                                <h3 class="profile-card-title">
+                                    <span class="profile-card-icon">📍</span>
+                                    Delivery Information
+                                </h3>
+                                <div class="profile-form-group">
+                                    <label class="profile-label">Home Address</label>
+                                    <input type="text" id="profile-address" class="profile-input" placeholder="123 Main St, San Francisco, CA 94102">
+                                    <p class="profile-hint">
+                                        This will be used as your default delivery address
+                                    </p>
+                                </div>
                             </div>
                         </div>
 
                         <!-- Driver-specific fields -->
                         <div id="driver-fields" style="display: none;">
-                            <div style="margin-bottom: 1rem;">
-                                <label>Vehicle Type</label>
-                                <select id="profile-vehicle-type">
-                                    <option value="car">Car</option>
-                                    <option value="bike">Bike</option>
-                                    <option value="scooter">Scooter</option>
-                                    <option value="motorcycle">Motorcycle</option>
-                                </select>
-                            </div>
-                            <div style="margin-bottom: 1rem;">
-                                <label>License Plate</label>
-                                <input type="text" id="profile-license-plate" placeholder="ABC-1234">
-                            </div>
-                            <div style="margin-bottom: 1rem;">
-                                <label>Driver's License Number</label>
-                                <input type="text" id="profile-license-number" placeholder="D1234567">
+                            <div class="profile-card">
+                                <h3 class="profile-card-title">
+                                    <span class="profile-card-icon">🚗</span>
+                                    Vehicle Information
+                                </h3>
+                                <div class="profile-form-grid">
+                                    <div class="profile-form-group">
+                                        <label class="profile-label">Vehicle Type</label>
+                                        <select id="profile-vehicle-type" class="profile-input">
+                                            <option value="car">🚗 Car</option>
+                                            <option value="bike">🚲 Bike</option>
+                                            <option value="scooter">🛴 Scooter</option>
+                                            <option value="motorcycle">🏍️ Motorcycle</option>
+                                        </select>
+                                    </div>
+                                    <div class="profile-form-group">
+                                        <label class="profile-label">License Plate</label>
+                                        <input type="text" id="profile-license-plate" class="profile-input" placeholder="ABC-1234">
+                                    </div>
+                                    <div class="profile-form-group full-width">
+                                        <label class="profile-label">Driver's License Number</label>
+                                        <input type="text" id="profile-license-number" class="profile-input" placeholder="D1234567">
+                                    </div>
+                                </div>
                             </div>
                         </div>
 
-                        <button type="submit" class="btn btn-primary btn-full">Save Profile</button>
+                        <!-- Save Button -->
+                        <div class="profile-actions">
+                            <button type="submit" class="btn btn-primary btn-large">
+                                💾 Save Profile
+                            </button>
+                        </div>
                     </form>
                 </div>
             </div>
