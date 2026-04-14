@@ -471,6 +471,19 @@ class StepFunctionsStack(Stack):
             result_path="$.assignment",
         )
 
+        # ── Step 7b: Update Order Status to DRIVER_ASSIGNED ──
+        update_order_driver_assigned = tasks.LambdaInvoke(
+            self,
+            "UpdateOrderDriverAssigned",
+            lambda_function=compute_stack.functions["order-service"],
+            payload=sfn.TaskInput.from_object({
+                "action": "update_status",
+                "order_id.$": "$.iteration.order_id",
+                "status": "DRIVER_ASSIGNED",
+            }),
+            result_path=sfn.JsonPath.DISCARD,
+        )
+
         # ── Step 8: Store Task Token and Wait for Pickup ──
         wait_for_pickup = tasks.LambdaInvoke(
             self,
@@ -535,7 +548,7 @@ class StepFunctionsStack(Stack):
         create_offer.next(check_offer_result
             .when(
                 sfn.Condition.string_equals("$.offer.status", "accepted"),
-                finalize_assignment.next(wait_for_pickup).next(wait_for_completion).next(delivery_success),
+                finalize_assignment.next(update_order_driver_assigned).next(wait_for_pickup).next(wait_for_completion).next(delivery_success),
             )
             .when(
                 sfn.Condition.is_present("$.error"),
