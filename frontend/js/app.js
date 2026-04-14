@@ -36,6 +36,13 @@ let driverMarker = null;
 let restaurantMarker = null;
 let destinationMarker = null;
 let routeLine = null;
+
+// Route animation state
+let currentRoute = null;
+let routeAnimationInterval = null;
+let animationProgress = 0;
+let animationDuration = 60000; // 60 seconds for full route
+let isAnimating = false; // Flag to prevent duplicate animations
 let currentOrderData = null;
 let currentTrackedOrder = null; // Full order object for tracking page
 
@@ -134,7 +141,7 @@ function handleWebSocketMessage(data) {
     }
 }
 
-function updateOrderStatus(data) {
+async function updateOrderStatus(data) {
     console.log("Order status update:", data);
 
     const status = (data.status || "").toLowerCase();
@@ -170,7 +177,53 @@ function updateOrderStatus(data) {
         if (trackingInfo && trackingInfo.innerHTML.includes(data.order_id.substring(0, 8))) {
             console.log("Updating status-based info in-place");
             // Find and update the status-based info section
-            updateStatusBasedInfo(data.status, data.order_id);
+            updateStatusBasedInfo(data.status, data.order_id, data.delivery_id);
+        }
+    }
+
+    // HYBRID APPROACH: Show driver position based on delivery workflow
+    // Get delivery_id from WebSocket message (now included) or fallback to currentOrderData
+    const deliveryId = data.delivery_id || (currentOrderData && currentOrderData.delivery_id);
+
+    if ((status === "driver_assigned" || status === "picked_up" || status === "delivering" || status === "delivered") && deliveryId && trackingMap && currentOrderData) {
+        console.log(`🚗 [HYBRID] Driver position update for status: ${status.toUpperCase()}`);
+
+        const restaurantLoc = parseLocation(currentOrderData.restaurant_location, { lat: 37.7849, lng: -122.4094 });
+        const deliveryLoc = parseLocation(currentOrderData.delivery_address, { lat: 37.7749, lng: -122.4194 });
+        let driverLoc = null;
+
+        try {
+            if (status === "picked_up" || status === "delivering") {
+                // LOGICAL POSITION: Driver at restaurant, ready to deliver to customer
+                // Start animation immediately (synchronous with driver's page)
+                console.log(`🚗 [${status.toUpperCase()}] Driver starts journey from restaurant to customer`);
+                driverLoc = restaurantLoc;
+
+            } else if (status === "delivered") {
+                // LOGICAL POSITION: Driver just delivered at customer location
+                console.log("🏠 [DELIVERED] Snapping driver to customer location");
+                driverLoc = deliveryLoc;
+
+            } else if (status === "driver_assigned") {
+                // LOGICAL POSITION: Driver at restaurant (waiting to pick up)
+                console.log("📍 [DRIVER_ASSIGNED] Driver at restaurant (ready to pick up)");
+                driverLoc = restaurantLoc;
+            }
+
+            // Update map with driver position
+            if (driverLoc && driverLoc.lat && driverLoc.lng) {
+                console.log(`🗺️ Updating map: Driver at [${driverLoc.lat.toFixed(4)}, ${driverLoc.lng.toFixed(4)}]`);
+                updateDriverMarkerOnMap(driverLoc.lat, driverLoc.lng);
+                // Redraw route with animation based on new status
+                await drawRoute(restaurantLoc, driverLoc, deliveryLoc, status);
+                fitMapBounds(restaurantLoc, deliveryLoc, driverLoc, status);
+                console.log("✅ Driver marker and route updated successfully");
+            } else {
+                console.log("❌ No valid driver location - marker not shown");
+            }
+
+        } catch (err) {
+            console.error("❌ Failed to update driver position:", err);
         }
     }
 
@@ -190,7 +243,7 @@ function updateOrderStatus(data) {
     showToast(message, status === "cancelled" ? "error" : "success");
 }
 
-function updateStatusBasedInfo(status, orderId) {
+function updateStatusBasedInfo(status, orderId, deliveryId = null) {
     // Find the status-based info container
     const statusInfoContainer = document.getElementById("status-based-info");
     if (!statusInfoContainer) {
@@ -198,9 +251,13 @@ function updateStatusBasedInfo(status, orderId) {
         return;
     }
 
-    // Update the stored order's status
+    // Update the stored order's status and delivery_id
     if (currentTrackedOrder) {
         currentTrackedOrder.status = status;
+        if (deliveryId) {
+            currentTrackedOrder.delivery_id = deliveryId;
+            console.log("Updated currentTrackedOrder with delivery_id:", deliveryId);
+        }
     } else {
         console.log("No current tracked order");
         return;
@@ -271,14 +328,17 @@ function initializeTrackingMap(orderData) {
     }
 
     // Add driver marker if available
-    if (driverLoc) {
+    console.log("Driver location parsed:", driverLoc);
+    if (driverLoc && driverLoc.lat && driverLoc.lng) {
+        console.log("Adding driver marker at:", driverLoc.lat, driverLoc.lng);
         updateDriverMarkerOnMap(driverLoc.lat, driverLoc.lng);
 
-        // Draw route: Restaurant -> Driver -> Destination
-        drawRoute(restaurantLoc, driverLoc, deliveryLoc);
+        // Draw route with animation based on order status
+        drawRoute(restaurantLoc, driverLoc, deliveryLoc, orderData.status);
     } else {
+        console.log("No valid driver location, drawing route without driver");
         // Draw direct line from restaurant to destination (before driver assigned)
-        drawRoute(restaurantLoc, null, deliveryLoc);
+        drawRoute(restaurantLoc, null, deliveryLoc, orderData.status);
     }
 
     // Fit bounds to show all markers
@@ -288,49 +348,240 @@ function initializeTrackingMap(orderData) {
 function parseLocation(locationData, fallback = null) {
     if (!locationData) return fallback;
 
+    console.log("Parsing location data:", locationData);
+
     // Handle different formats: {lat, lng}, "lat,lng", {latitude, longitude}
     if (typeof locationData === 'string') {
         const parts = locationData.split(',');
         if (parts.length === 2) {
-            return { lat: parseFloat(parts[0]), lng: parseFloat(parts[1]) };
+            const parsed = { lat: parseFloat(parts[0]), lng: parseFloat(parts[1]) };
+            console.log("Parsed from string:", parsed);
+            return parsed;
         }
     } else if (typeof locationData === 'object') {
+        // Check for empty object
+        if (Object.keys(locationData).length === 0) {
+            console.log("Empty location object, using fallback");
+            return fallback;
+        }
+
+        // Standard format: {lat, lng}
         if (locationData.lat !== undefined && locationData.lng !== undefined) {
-            return { lat: parseFloat(locationData.lat), lng: parseFloat(locationData.lng) };
-        } else if (locationData.latitude !== undefined && locationData.longitude !== undefined) {
-            return { lat: parseFloat(locationData.latitude), lng: parseFloat(locationData.longitude) };
+            const parsed = { lat: parseFloat(locationData.lat), lng: parseFloat(locationData.lng) };
+            console.log("Parsed from lat/lng:", parsed);
+            return parsed;
+        }
+
+        // Alternative format: {latitude, longitude}
+        if (locationData.latitude !== undefined && locationData.longitude !== undefined) {
+            const parsed = { lat: parseFloat(locationData.latitude), lng: parseFloat(locationData.longitude) };
+            console.log("Parsed from latitude/longitude:", parsed);
+            return parsed;
+        }
+
+        // DynamoDB Decimal format: numbers might be strings
+        if (typeof locationData.lat === 'string' && typeof locationData.lng === 'string') {
+            const parsed = { lat: parseFloat(locationData.lat), lng: parseFloat(locationData.lng) };
+            console.log("Parsed from string numbers:", parsed);
+            return parsed;
         }
     }
 
+    console.log("Could not parse location, using fallback:", fallback);
     return fallback;
 }
 
-function drawRoute(restaurantLoc, driverLoc, deliveryLoc) {
+/**
+ * Fetch actual driving route from OSRM API
+ * @param {Object} from - Starting location {lat, lng}
+ * @param {Object} to - Destination location {lat, lng}
+ * @returns {Promise<Array>} - Array of [lat, lng] coordinates along the route
+ */
+async function fetchRoute(from, to) {
+    try {
+        // OSRM requires lng,lat format (not lat,lng!)
+        const url = `https://router.project-osrm.org/route/v1/driving/${from.lng},${from.lat};${to.lng},${to.lat}?overview=full&geometries=geojson`;
+
+        console.log(`🗺️ [ROUTE] Fetching route from (${from.lat}, ${from.lng}) to (${to.lat}, ${to.lng})`);
+
+        const response = await fetch(url);
+        const data = await response.json();
+
+        if (data.code !== 'Ok' || !data.routes || data.routes.length === 0) {
+            console.warn("OSRM routing failed, using straight line");
+            return [[from.lat, from.lng], [to.lat, to.lng]];
+        }
+
+        // Extract coordinates from GeoJSON (they're in [lng, lat] format)
+        const coordinates = data.routes[0].geometry.coordinates.map(coord => [coord[1], coord[0]]);
+        console.log(`✅ [ROUTE] Fetched route with ${coordinates.length} points`);
+
+        return coordinates;
+    } catch (error) {
+        console.error("Error fetching route:", error);
+        // Fallback to straight line
+        return [[from.lat, from.lng], [to.lat, to.lng]];
+    }
+}
+
+/**
+ * Stop any ongoing route animation
+ */
+function stopRouteAnimation() {
+    if (routeAnimationInterval) {
+        clearInterval(routeAnimationInterval);
+        routeAnimationInterval = null;
+        console.log("⏹️ [ANIMATION] Stopped");
+    }
+    animationProgress = 0;
+    isAnimating = false;
+}
+
+/**
+ * Animate driver marker along a route
+ * @param {Array} route - Array of [lat, lng] coordinates
+ * @param {number} duration - Animation duration in milliseconds
+ * @param {string} orderStatus - Current order status for logging
+ */
+function animateDriverAlongRoute(route, duration, orderStatus) {
+    if (!route || route.length < 2) {
+        console.warn("Cannot animate: route too short");
+        return;
+    }
+
+    // Prevent duplicate animations - only start if not already animating
+    if (isAnimating) {
+        console.log("⚠️ [ANIMATION] Already in progress, skipping duplicate start");
+        return;
+    }
+
+    // Stop any existing animation
+    stopRouteAnimation();
+
+    console.log(`🎬 [ANIMATION] Starting animation along ${route.length} points over ${duration/1000}s (status: ${orderStatus})`);
+
+    isAnimating = true;
+    animationProgress = 0;
+    const startTime = Date.now();
+
+    routeAnimationInterval = setInterval(() => {
+        const elapsed = Date.now() - startTime;
+        const progress = Math.min(elapsed / duration, 1.0); // 0 to 1
+
+        // Find position along route based on progress
+        const totalPoints = route.length - 1;
+        const currentIndex = Math.floor(progress * totalPoints);
+        const nextIndex = Math.min(currentIndex + 1, totalPoints);
+
+        // Interpolate between current and next point
+        const segmentProgress = (progress * totalPoints) - currentIndex;
+        const currentPoint = route[currentIndex];
+        const nextPoint = route[nextIndex];
+
+        const lat = currentPoint[0] + (nextPoint[0] - currentPoint[0]) * segmentProgress;
+        const lng = currentPoint[1] + (nextPoint[1] - currentPoint[1]) * segmentProgress;
+
+        // Update driver marker position
+        updateDriverMarkerOnMap(lat, lng);
+
+        animationProgress = progress;
+
+        // Stop when complete
+        if (progress >= 1.0) {
+            console.log("✅ [ANIMATION] Completed");
+            stopRouteAnimation();
+        }
+    }, 100); // Update every 100ms for smooth animation
+}
+
+async function drawRoute(restaurantLoc, driverLoc, deliveryLoc, orderStatus) {
     // Remove existing route line
     if (routeLine) {
         trackingMap.removeLayer(routeLine);
     }
 
-    const points = [];
+    const status = (orderStatus || "").toLowerCase();
+    let routeCoordinates = [];
 
-    if (driverLoc) {
-        // Driver is on the way: Restaurant -> Driver -> Destination
-        points.push([restaurantLoc.lat, restaurantLoc.lng]);
-        points.push([driverLoc.lat, driverLoc.lng]);
-        points.push([deliveryLoc.lat, deliveryLoc.lng]);
-    } else {
-        // No driver yet: Restaurant -> Destination
-        points.push([restaurantLoc.lat, restaurantLoc.lng]);
-        points.push([deliveryLoc.lat, deliveryLoc.lng]);
+    if (!driverLoc) {
+        // No driver yet: Draw simple route Restaurant -> Destination (dashed)
+        console.log("📍 [ROUTE] No driver assigned, showing restaurant-to-destination route");
+        routeCoordinates = await fetchRoute(restaurantLoc, deliveryLoc);
+
+        routeLine = L.polyline(routeCoordinates, {
+            color: '#e63946',
+            weight: 4,
+            opacity: 0.5,
+            dashArray: '10, 10',  // Dashed when no driver
+        }).addTo(trackingMap);
+
+        currentRoute = null;
+        return;
     }
 
-    // Draw polyline
-    routeLine = L.polyline(points, {
-        color: '#e63946',
-        weight: 4,
-        opacity: 0.7,
-        dashArray: driverLoc ? null : '10, 10',  // Dashed when no driver
-    }).addTo(trackingMap);
+    // Driver is assigned - determine which route to show and animate
+    if (status === "driver_assigned") {
+        // Driver assigned but hasn't picked up yet - show static position, NO animation
+        console.log(`📍 [ROUTE] Driver assigned (static) - showing route preview without animation`);
+
+        // Show route from restaurant to customer (preview, dashed)
+        routeCoordinates = await fetchRoute(restaurantLoc, deliveryLoc);
+        routeLine = L.polyline(routeCoordinates, {
+            color: '#4caf50',
+            weight: 4,
+            opacity: 0.5,
+            dashArray: '10, 10',  // Dashed to indicate preview
+        }).addTo(trackingMap);
+
+        // NO animation - driver is stationary until pickup
+        currentRoute = null;
+        stopRouteAnimation();
+        console.log("⏸️ [ROUTE] Driver stationary - waiting for pickup")
+
+    } else if (status === "picked_up" || status === "delivering") {
+        // Driver delivering from restaurant to customer
+        // Start animation immediately (synchronous with driver's page)
+        console.log(`🚗 [ROUTE] Driver → Customer (from restaurant) - status: ${status.toUpperCase()}`);
+
+        // IMPORTANT: Driver starts from restaurant (where they just picked up)
+        const startLoc = restaurantLoc;
+        routeCoordinates = await fetchRoute(startLoc, deliveryLoc);
+
+        // Draw the actual route
+        routeLine = L.polyline(routeCoordinates, {
+            color: '#4caf50',
+            weight: 4,
+            opacity: 0.7,
+        }).addTo(trackingMap);
+
+        // Store route for animation
+        currentRoute = routeCoordinates;
+
+        // Position driver marker at the START of the route (restaurant) before animating
+        if (routeCoordinates && routeCoordinates.length > 0) {
+            const startPoint = routeCoordinates[0];
+            console.log(`📍 [ANIMATION SETUP] Positioning driver at route start: [${startPoint[0]}, ${startPoint[1]}]`);
+            updateDriverMarkerOnMap(startPoint[0], startPoint[1]);
+        }
+
+        // Start animation along this route immediately
+        animateDriverAlongRoute(routeCoordinates, animationDuration, status);
+
+    } else if (status === "delivered") {
+        // Delivery complete - driver at customer location
+        console.log("🏠 [ROUTE] Delivered - no active route");
+        currentRoute = null;
+        stopRouteAnimation();
+
+    } else {
+        // Default: show full route Restaurant -> Customer
+        routeCoordinates = await fetchRoute(restaurantLoc, deliveryLoc);
+        routeLine = L.polyline(routeCoordinates, {
+            color: '#e63946',
+            weight: 4,
+            opacity: 0.7,
+        }).addTo(trackingMap);
+    }
 }
 
 function updateDriverMarkerOnMap(lat, lng) {
@@ -532,6 +783,24 @@ function getStatusBasedInfo(order) {
                 <h4 style="margin: 0 0 0.5rem 0; font-size: 1.2rem; color: #155724;">🎉 Delivered!</h4>
                 <p style="color: #155724; margin: 0; font-size: 0.9rem;">
                     Your order has been delivered. Enjoy your meal!
+                </p>
+            </div>
+        `;
+    } else if (status === "FAILED") {
+        return `
+            <div style="background: linear-gradient(135deg, #f8d7da 0%, #f5c6cb 100%); padding: 1.5rem; border-radius: 8px; border-left: 4px solid #dc3545; text-align: center;">
+                <h4 style="margin: 0 0 0.5rem 0; font-size: 1.2rem; color: #721c24;">❌ Order Failed</h4>
+                <p style="color: #721c24; margin: 0; font-size: 0.9rem;">
+                    Unfortunately, this order could not be completed. ${order.failure_reason || 'No available drivers were found to deliver your order.'} Please try placing a new order.
+                </p>
+            </div>
+        `;
+    } else if (status === "CANCELLED") {
+        return `
+            <div style="background: linear-gradient(135deg, #f8d7da 0%, #f5c6cb 100%); padding: 1.5rem; border-radius: 8px; border-left: 4px solid #dc3545; text-align: center;">
+                <h4 style="margin: 0 0 0.5rem 0; font-size: 1.2rem; color: #721c24;">🚫 Order Cancelled</h4>
+                <p style="color: #721c24; margin: 0; font-size: 0.9rem;">
+                    This order has been cancelled. ${order.cancellation_reason || 'You can place a new order anytime.'}
                 </p>
             </div>
         `;
@@ -1393,6 +1662,35 @@ async function trackOrder(orderId) {
             driver_location: order.driver_location || null, // Will be updated via WebSocket
             status: order.status
         };
+
+        // HYBRID APPROACH: Determine driver location based on order status
+        const orderStatus = (order.status || "").toLowerCase();
+        console.log(`🚗 [INITIAL LOAD] Order status: ${orderStatus.toUpperCase()}`);
+
+        if (order.delivery_id && (orderStatus === "driver_assigned" || orderStatus === "picked_up" || orderStatus === "delivering" || orderStatus === "delivered")) {
+            const restaurantLoc = parseLocation(order.restaurant_location, { lat: 37.7849, lng: -122.4094 });
+            const deliveryLoc = parseLocation(order.delivery_address, { lat: 37.7749, lng: -122.4194 });
+
+            if (orderStatus === "picked_up" || orderStatus === "delivering") {
+                // LOGICAL: Driver at restaurant (either just picked up or delivering)
+                console.log(`📦 [${orderStatus.toUpperCase()}] Driver position: Restaurant`);
+                mapData.driver_location = restaurantLoc;
+
+            } else if (orderStatus === "delivered") {
+                // LOGICAL: Driver delivered at customer location
+                console.log("🏠 [DELIVERED] Driver position: Customer location");
+                mapData.driver_location = deliveryLoc;
+
+            } else if (orderStatus === "driver_assigned") {
+                // LOGICAL: Driver at restaurant (assigned, waiting to pick up)
+                console.log("📍 [DRIVER_ASSIGNED] Driver position: Restaurant");
+                mapData.driver_location = restaurantLoc;
+            }
+        } else {
+            console.log("No delivery_id or status doesn't require driver marker");
+        }
+
+        console.log("Final mapData:", mapData);
         initializeTrackingMap(mapData);
 
         // Subscribe to WebSocket updates for this order
@@ -2070,6 +2368,11 @@ let driverDestinationMarker = null;
 let driverDriverMarker = null;
 let driverRouteLine = null;
 
+// Driver map animation state
+let driverCurrentRoute = null;
+let driverRouteAnimationInterval = null;
+let driverAnimationProgress = 0;
+
 function initDriverDeliveryMap(orderData) {
     const mapDiv = document.getElementById("driver-delivery-map");
     if (!mapDiv) return;
@@ -2087,7 +2390,43 @@ function initDriverDeliveryMap(orderData) {
     // Parse locations from order data (same as customer map)
     const restaurantLoc = parseLocation(orderData.restaurant_location, { lat: 37.7849, lng: -122.4094 });
     const deliveryLoc = parseLocation(orderData.delivery_address, { lat: 37.7749, lng: -122.4194 });
-    const driverLoc = orderData.driver_location ? parseLocation(orderData.driver_location) : null;
+
+    // HYBRID APPROACH: Determine driver position based on order status
+    const orderStatus = (orderData.status || "").toLowerCase();
+    console.log(`🚗 [DRIVER MAP] Order status: ${orderStatus.toUpperCase()}`);
+
+    let driverLoc = null;
+
+    if (orderStatus === "picked_up") {
+        // LOGICAL: Driver just picked up at restaurant
+        console.log("📦 [DRIVER MAP] Driver at restaurant (just picked up)");
+        driverLoc = restaurantLoc;
+    } else if (orderStatus === "delivered") {
+        // LOGICAL: Driver at customer location (just delivered)
+        console.log("🏠 [DRIVER MAP] Driver at customer location (just delivered)");
+        driverLoc = deliveryLoc;
+    } else {
+        // REAL GPS: Use driver's actual location for moving states
+        console.log("🛰️ [DRIVER MAP] Using driver GPS location");
+        driverLoc = orderData.driver_location ? parseLocation(orderData.driver_location) : null;
+
+        // Fallback if no GPS
+        if (!driverLoc) {
+            if (orderStatus === "driver_assigned") {
+                console.log("⚠️ [DRIVER MAP] No GPS - defaulting to restaurant");
+                driverLoc = restaurantLoc;
+            } else if (orderStatus === "delivering") {
+                console.log("⚠️ [DRIVER MAP] No GPS - using midpoint");
+                driverLoc = {
+                    lat: (restaurantLoc.lat + deliveryLoc.lat) / 2,
+                    lng: (restaurantLoc.lng + deliveryLoc.lng) / 2
+                };
+            } else {
+                // Default fallback
+                driverLoc = restaurantLoc;
+            }
+        }
+    }
 
     // Initialize fresh map
     driverDeliveryMap = L.map(mapDiv).setView([restaurantLoc.lat, restaurantLoc.lng], 13);
@@ -2136,25 +2475,16 @@ function initDriverDeliveryMap(orderData) {
     }).addTo(driverDeliveryMap);
     driverDriverMarker.bindPopup("<b>You</b><br>Your location");
 
-    // Draw route line
-    const points = [
-        [driverPosition.lat, driverPosition.lng],
-        [restaurantLoc.lat, restaurantLoc.lng],
-        [deliveryLoc.lat, deliveryLoc.lng]
-    ];
-    driverRouteLine = L.polyline(points, {
-        color: '#e63946',
-        weight: 4,
-        opacity: 0.7,
-    }).addTo(driverDeliveryMap);
-
-    // Fit map to show all markers
-    const bounds = L.latLngBounds([
-        [driverPosition.lat, driverPosition.lng],
-        [restaurantLoc.lat, restaurantLoc.lng],
-        [deliveryLoc.lat, deliveryLoc.lng]
-    ]);
-    driverDeliveryMap.fitBounds(bounds, { padding: [50, 50] });
+    // Draw actual route using OSRM
+    drawDriverDeliveryRoute(driverPosition, restaurantLoc, deliveryLoc, orderStatus).then(() => {
+        // Fit map to show all markers after route is drawn
+        const bounds = L.latLngBounds([
+            [driverPosition.lat, driverPosition.lng],
+            [restaurantLoc.lat, restaurantLoc.lng],
+            [deliveryLoc.lat, deliveryLoc.lng]
+        ]);
+        driverDeliveryMap.fitBounds(bounds, { padding: [50, 50] });
+    });
 
     // Calculate and display ETA
     const totalDistance = calculateDistance([driverPosition.lat, driverPosition.lng], [restaurantLoc.lat, restaurantLoc.lng]) +
@@ -2163,6 +2493,156 @@ function initDriverDeliveryMap(orderData) {
     const etaElement = document.getElementById("delivery-eta");
     if (etaElement) {
         etaElement.textContent = `${etaMinutes} minutes`;
+    }
+}
+
+/**
+ * Stop driver map animation
+ */
+function stopDriverMapAnimation() {
+    if (driverRouteAnimationInterval) {
+        clearInterval(driverRouteAnimationInterval);
+        driverRouteAnimationInterval = null;
+        console.log("⏹️ [DRIVER ANIMATION] Stopped");
+    }
+    driverAnimationProgress = 0;
+}
+
+/**
+ * Animate driver marker on driver's map along a route
+ */
+function animateDriverMapMarker(route, duration, orderStatus) {
+    if (!route || route.length < 2 || !driverDriverMarker) {
+        console.warn("Cannot animate driver map: route too short or marker missing");
+        return;
+    }
+
+    // Stop any existing animation
+    stopDriverMapAnimation();
+
+    console.log(`🎬 [DRIVER ANIMATION] Starting animation along ${route.length} points over ${duration/1000}s (status: ${orderStatus})`);
+
+    driverAnimationProgress = 0;
+    const startTime = Date.now();
+
+    driverRouteAnimationInterval = setInterval(() => {
+        const elapsed = Date.now() - startTime;
+        const progress = Math.min(elapsed / duration, 1.0); // 0 to 1
+
+        // Find position along route based on progress
+        const totalPoints = route.length - 1;
+        const currentIndex = Math.floor(progress * totalPoints);
+        const nextIndex = Math.min(currentIndex + 1, totalPoints);
+
+        // Interpolate between current and next point
+        const segmentProgress = (progress * totalPoints) - currentIndex;
+        const currentPoint = route[currentIndex];
+        const nextPoint = route[nextIndex];
+
+        const lat = currentPoint[0] + (nextPoint[0] - currentPoint[0]) * segmentProgress;
+        const lng = currentPoint[1] + (nextPoint[1] - currentPoint[1]) * segmentProgress;
+
+        // Update driver marker position
+        if (driverDriverMarker) {
+            driverDriverMarker.setLatLng([lat, lng]);
+        }
+
+        driverAnimationProgress = progress;
+
+        // Stop when complete
+        if (progress >= 1.0) {
+            console.log("✅ [DRIVER ANIMATION] Completed");
+            stopDriverMapAnimation();
+        }
+    }, 100); // Update every 100ms for smooth animation
+}
+
+/**
+ * Draw route on driver's delivery map using OSRM with animation
+ */
+async function drawDriverDeliveryRoute(driverLoc, restaurantLoc, deliveryLoc, orderStatus) {
+    if (!driverDeliveryMap) return;
+
+    // Remove existing route
+    if (driverRouteLine) {
+        driverDeliveryMap.removeLayer(driverRouteLine);
+    }
+
+    const status = (orderStatus || "").toLowerCase();
+    let routeCoordinates = [];
+
+    // Determine which route to show based on order status
+    if (status === "driver_assigned") {
+        // Driver going to restaurant - animate
+        console.log("🚗 [DRIVER MAP ROUTE] Fetching route to restaurant");
+
+        const distance = calculateDistance([driverLoc.lat, driverLoc.lng], [restaurantLoc.lat, restaurantLoc.lng]);
+        if (distance > 0.01) { // More than 10 meters away
+            routeCoordinates = await fetchRoute(driverLoc, restaurantLoc);
+
+            driverRouteLine = L.polyline(routeCoordinates, {
+                color: '#e63946',
+                weight: 4,
+                opacity: 0.7,
+            }).addTo(driverDeliveryMap);
+
+            // Animate driver marker along route
+            driverCurrentRoute = routeCoordinates;
+            animateDriverMapMarker(routeCoordinates, animationDuration, status);
+        } else {
+            console.log("Driver already at restaurant");
+            routeCoordinates = await fetchRoute(restaurantLoc, deliveryLoc);
+            driverRouteLine = L.polyline(routeCoordinates, {
+                color: '#4caf50',
+                weight: 4,
+                opacity: 0.5,
+                dashArray: '10, 10',
+            }).addTo(driverDeliveryMap);
+            stopDriverMapAnimation();
+        }
+
+    } else if (status === "picked_up") {
+        // Show route from restaurant to customer (driver is at restaurant, stationary)
+        console.log("📦 [DRIVER MAP ROUTE] Showing route to customer (no animation)");
+        routeCoordinates = await fetchRoute(restaurantLoc, deliveryLoc);
+
+        driverRouteLine = L.polyline(routeCoordinates, {
+            color: '#4caf50',
+            weight: 4,
+            opacity: 0.7,
+        }).addTo(driverDeliveryMap);
+
+        stopDriverMapAnimation(); // No animation - driver stationary
+
+    } else if (status === "delivering") {
+        // Driver going from restaurant to customer - animate
+        console.log("🚗 [DRIVER MAP ROUTE] Fetching route to customer (from restaurant)");
+
+        // Start from restaurant (where driver just picked up)
+        const startLoc = restaurantLoc;
+        routeCoordinates = await fetchRoute(startLoc, deliveryLoc);
+
+        driverRouteLine = L.polyline(routeCoordinates, {
+            color: '#4caf50',
+            weight: 4,
+            opacity: 0.7,
+        }).addTo(driverDeliveryMap);
+
+        // Animate driver marker along route
+        driverCurrentRoute = routeCoordinates;
+        animateDriverMapMarker(routeCoordinates, animationDuration, status);
+
+    } else {
+        // Default: show full journey
+        const toRestaurant = await fetchRoute(driverLoc, restaurantLoc);
+        const toCustomer = await fetchRoute(restaurantLoc, deliveryLoc);
+        routeCoordinates = [...toRestaurant, ...toCustomer];
+
+        driverRouteLine = L.polyline(routeCoordinates, {
+            color: '#e63946',
+            weight: 4,
+            opacity: 0.7,
+        }).addTo(driverDeliveryMap);
     }
 }
 
@@ -2198,12 +2678,33 @@ async function completePickup() {
 
         if (response.ok) {
             showToast("Marked as picked up! Navigate to customer.", "success");
-            // Update UI to show delivery phase
-            const button = document.querySelector("#active-delivery-content button");
-            if (button) {
-                button.textContent = "✓ Delivered to Customer";
-                button.onclick = completeDelivery;
+
+            // Update driver map to show route from restaurant to customer
+            if (currentOrderData && driverDeliveryMap) {
+                const restaurantLoc = parseLocation(currentOrderData.restaurant_location, { lat: 37.7849, lng: -122.4094 });
+                const deliveryLoc = parseLocation(currentOrderData.delivery_address, { lat: 37.7749, lng: -122.4194 });
+
+                // Update driver marker to restaurant position
+                if (driverDriverMarker) {
+                    driverDriverMarker.setLatLng([restaurantLoc.lat, restaurantLoc.lng]);
+                }
+
+                // Redraw route for "delivering" status (will trigger animation)
+                await drawDriverDeliveryRoute(restaurantLoc, restaurantLoc, deliveryLoc, "delivering");
             }
+
+            // Update UI to show delivery phase
+            setTimeout(() => {
+                const button = document.querySelector("#active-delivery-content button");
+                console.log("🔧 [BUTTON UPDATE] Button found:", button ? "YES" : "NO");
+                if (button) {
+                    button.textContent = "✓ Delivered to Customer";
+                    button.onclick = completeDelivery;
+                    console.log("✅ [BUTTON UPDATE] Button text updated to 'Delivered to Customer'");
+                } else {
+                    console.error("❌ [BUTTON UPDATE] Button not found!");
+                }
+            }, 100);
         } else {
             const result = await response.json();
             showToast(result.error || "Failed to mark as picked up", "error");
@@ -2234,6 +2735,25 @@ async function completeDelivery() {
 
         if (response.ok) {
             showToast("Delivery completed! Great job!", "success");
+
+            // Update driver map to show completion
+            if (currentOrderData && driverDeliveryMap) {
+                const deliveryLoc = parseLocation(currentOrderData.delivery_address, { lat: 37.7749, lng: -122.4194 });
+
+                // Stop animation and move driver to customer location
+                stopDriverMapAnimation();
+
+                if (driverDriverMarker) {
+                    driverDriverMarker.setLatLng([deliveryLoc.lat, deliveryLoc.lng]);
+                }
+
+                // Remove route line
+                if (driverRouteLine) {
+                    driverDeliveryMap.removeLayer(driverRouteLine);
+                    driverRouteLine = null;
+                }
+            }
+
             // Clear current offer
             currentOffer = null;
             setTimeout(() => {

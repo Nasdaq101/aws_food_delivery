@@ -83,6 +83,10 @@ def lambda_handler(event, context):
                 return _create_driver_offer(event)
             elif action == "finalize_assignment":
                 return _finalize_assignment(event)
+            elif action == "store_pickup_token":
+                return _store_pickup_token(event)
+            elif action == "store_completion_token":
+                return _store_completion_token(event)
             else:
                 return {"error": "Unknown action", "action": action}
 
@@ -681,6 +685,68 @@ def _emit_driver_offer_event(offer):
         print(f"Error emitting driver offer event: {str(e)}")
 
 
+def _store_pickup_token(event):
+    """
+    Called by Step Functions to store task token for pickup callback.
+    Step Functions waits until driver marks order as picked up.
+    """
+    delivery_id = event.get("delivery_id")
+    task_token = event.get("task_token")
+
+    if not all([delivery_id, task_token]):
+        return {"error": "Missing required fields", "status": "error"}
+
+    try:
+        # Store task token in delivery record
+        deliveries_table.update_item(
+            Key={"delivery_id": delivery_id},
+            UpdateExpression="SET pickup_task_token = :token",
+            ExpressionAttributeValues={":token": task_token},
+        )
+
+        print(f"Stored pickup task token for delivery {delivery_id}")
+
+        # Return immediately - Step Functions waits for callback
+        return {
+            "status": "waiting_for_pickup",
+            "delivery_id": delivery_id,
+        }
+    except Exception as e:
+        print(f"Error storing pickup task token: {str(e)}")
+        return {"error": str(e), "status": "error"}
+
+
+def _store_completion_token(event):
+    """
+    Called by Step Functions to store task token for completion callback.
+    Step Functions waits until driver marks delivery as completed.
+    """
+    delivery_id = event.get("delivery_id")
+    task_token = event.get("task_token")
+
+    if not all([delivery_id, task_token]):
+        return {"error": "Missing required fields", "status": "error"}
+
+    try:
+        # Store task token in delivery record
+        deliveries_table.update_item(
+            Key={"delivery_id": delivery_id},
+            UpdateExpression="SET completion_task_token = :token",
+            ExpressionAttributeValues={":token": task_token},
+        )
+
+        print(f"Stored completion task token for delivery {delivery_id}")
+
+        # Return immediately - Step Functions waits for callback
+        return {
+            "status": "waiting_for_completion",
+            "delivery_id": delivery_id,
+        }
+    except Exception as e:
+        print(f"Error storing completion task token: {str(e)}")
+        return {"error": str(e), "status": "error"}
+
+
 def _handle_pickup(event):
     """Handle driver marking delivery as picked up"""
     delivery_id = event.get("delivery_id")
@@ -866,6 +932,37 @@ def _handle_pickup(event):
             import traceback
             traceback.print_exc()
 
+        # ── Send Task Success to Step Functions (if task token exists) ──
+        try:
+            # Get delivery again to check for task token
+            delivery_response = deliveries_table.get_item(Key={"delivery_id": delivery_id})
+            delivery = delivery_response.get("Item")
+
+            if delivery and "pickup_task_token" in delivery:
+                task_token = delivery["pickup_task_token"]
+                print(f"Found pickup task token, sending success to Step Functions")
+
+                # Send success to Step Functions
+                stepfunctions.send_task_success(
+                    taskToken=task_token,
+                    output=json.dumps({
+                        "status": "picked_up",
+                        "delivery_id": delivery_id,
+                        "pickup_time": now,
+                    }, default=str)
+                )
+
+                # Remove task token from delivery
+                deliveries_table.update_item(
+                    Key={"delivery_id": delivery_id},
+                    UpdateExpression="REMOVE pickup_task_token",
+                )
+
+                print(f"Successfully sent pickup task success to Step Functions")
+        except Exception as e:
+            print(f"Error sending task success to Step Functions: {str(e)}")
+            # Don't fail the request - pickup was successful even if callback failed
+
         return response(200, {
             "message": "Delivery marked as picked up and now delivering",
             "delivery_id": delivery_id,
@@ -1010,6 +1107,37 @@ def _handle_complete(event):
                 "EventBusName": EVENT_BUS_NAME,
             }]
         )
+
+        # ── Send Task Success to Step Functions (if task token exists) ──
+        try:
+            # Get delivery again to check for task token
+            delivery_response = deliveries_table.get_item(Key={"delivery_id": delivery_id})
+            delivery_check = delivery_response.get("Item")
+
+            if delivery_check and "completion_task_token" in delivery_check:
+                task_token = delivery_check["completion_task_token"]
+                print(f"Found completion task token, sending success to Step Functions")
+
+                # Send success to Step Functions
+                stepfunctions.send_task_success(
+                    taskToken=task_token,
+                    output=json.dumps({
+                        "status": "delivered",
+                        "delivery_id": delivery_id,
+                        "delivery_time": now,
+                    }, default=str)
+                )
+
+                # Remove task token from delivery
+                deliveries_table.update_item(
+                    Key={"delivery_id": delivery_id},
+                    UpdateExpression="REMOVE completion_task_token",
+                )
+
+                print(f"Successfully sent completion task success to Step Functions")
+        except Exception as e:
+            print(f"Error sending task success to Step Functions: {str(e)}")
+            # Don't fail the request - completion was successful even if callback failed
 
         return response(200, {
             "message": "Delivery marked as completed",

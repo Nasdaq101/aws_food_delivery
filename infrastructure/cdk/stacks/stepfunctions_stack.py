@@ -34,13 +34,13 @@ class StepFunctionsStack(Stack):
         self.delivery_workflow_log_group = logs.LogGroup(
             self,
             "DeliveryWorkflowLogGroup",
-            log_group_name="/aws/stepfunctions/delivery-assignment",
+            log_group_name="/aws/stepfunctions/delivery-processing",
             retention=logs.RetentionDays.ONE_WEEK,
             removal_policy=RemovalPolicy.DESTROY,
         )
 
-        # ── Build Delivery Assignment State Machine First ──
-        self.delivery_state_machine = self._create_delivery_assignment_workflow(
+        # ── Build Delivery Processing State Machine First ──
+        self.delivery_state_machine = self._create_delivery_processing_workflow(
             compute_stack, messaging_stack
         )
 
@@ -72,7 +72,7 @@ class StepFunctionsStack(Stack):
             self,
             "DeliveryWorkflowArn",
             value=self.delivery_state_machine.state_machine_arn,
-            description="Delivery Assignment Workflow ARN",
+            description="Delivery Processing Workflow ARN",
             export_name="FoodDelivery-DeliveryWorkflowArn",
         )
 
@@ -171,10 +171,10 @@ class StepFunctionsStack(Stack):
             result_path="$.status_update_preparing",
         )
 
-        # ── Step 5: Start Delivery Assignment (nested state machine) ──
+        # ── Step 5: Start Delivery Processing (nested state machine) ──
         start_delivery = tasks.StepFunctionsStartExecution(
             self,
-            "StartDeliveryAssignment",
+            "StartDeliveryProcessing",
             state_machine=self.delivery_state_machine,
             input=sfn.TaskInput.from_object({
                 "order_id.$": "$.order_id",
@@ -183,7 +183,7 @@ class StepFunctionsStack(Stack):
                 "delivery_address.$": "$.validation.Payload.delivery_address",
             }),
             integration_pattern=sfn.IntegrationPattern.RUN_JOB,  # Wait for completion
-            result_path="$.delivery_assignment",
+            result_path="$.delivery_processing",
         )
 
         # ── Step 5b: Update Order with Delivery ID ──
@@ -194,8 +194,8 @@ class StepFunctionsStack(Stack):
             payload=sfn.TaskInput.from_object({
                 "action": "update_status",
                 "order_id.$": "$.order_id",
-                "status": "DRIVER_ASSIGNED",
-                "delivery_id.$": "$.delivery_assignment.Output.delivery.Payload.delivery_id",
+                "status": "DELIVERED",
+                "delivery_id.$": "$.delivery_processing.Output.delivery.Payload.delivery_id",
             }),
             result_path="$.delivery_update",
         )
@@ -206,11 +206,11 @@ class StepFunctionsStack(Stack):
             "SendCustomerNotification",
             topic=messaging_stack.notification_topic,
             message=sfn.TaskInput.from_object({
-                "type": "ORDER_CONFIRMED",
+                "type": "ORDER_DELIVERED",
                 "order_id.$": "$.order_id",
                 "user_id.$": "$.user_id",
-                "driver_name.$": "$.delivery_assignment.Output.drivers.Payload.best_driver.name",
-                "estimated_time.$": "$.delivery_assignment.Output.drivers.Payload.best_driver.eta",
+                "driver_name.$": "$.delivery_processing.Output.drivers.Payload.best_driver.name",
+                "estimated_time.$": "$.delivery_processing.Output.drivers.Payload.best_driver.eta",
             }),
             result_path=sfn.JsonPath.DISCARD,
         )
@@ -345,15 +345,17 @@ class StepFunctionsStack(Stack):
 
         return state_machine
 
-    def _create_delivery_assignment_workflow(self, compute_stack, messaging_stack):
+    def _create_delivery_processing_workflow(self, compute_stack, messaging_stack):
         """
-        Enhanced delivery assignment workflow with driver acceptance:
+        Complete delivery processing workflow:
         1. Find Available Drivers (up to 5)
         2. Create Delivery Record
         3. Iterate through drivers sequentially
         4. Create offer with task token (wait for callback)
         5. Handle acceptance/rejection/timeout
         6. Retry with next driver if rejected
+        7. Wait for driver to pick up (with task token)
+        8. Wait for driver to complete delivery (with task token)
         """
 
         # ── Step 1: Find Available Drivers ──
@@ -469,10 +471,53 @@ class StepFunctionsStack(Stack):
             result_path="$.assignment",
         )
 
-        assignment_success = sfn.Succeed(
+        # ── Step 7b: Update Order Status to DRIVER_ASSIGNED ──
+        update_order_driver_assigned = tasks.LambdaInvoke(
             self,
-            "DeliveryAssignmentComplete",
-            comment="Driver accepted delivery",
+            "UpdateOrderDriverAssigned",
+            lambda_function=compute_stack.functions["order-service"],
+            payload=sfn.TaskInput.from_object({
+                "action": "update_status",
+                "order_id.$": "$.iteration.order_id",
+                "status": "DRIVER_ASSIGNED",
+            }),
+            result_path=sfn.JsonPath.DISCARD,
+        )
+
+        # ── Step 8: Store Task Token and Wait for Pickup ──
+        wait_for_pickup = tasks.LambdaInvoke(
+            self,
+            "WaitForPickup",
+            lambda_function=compute_stack.functions["delivery-service"],
+            payload=sfn.TaskInput.from_object({
+                "action": "store_pickup_token",
+                "delivery_id.$": "$.iteration.delivery_id",
+                "task_token": sfn.JsonPath.task_token,
+            }),
+            result_path="$.pickup",
+            integration_pattern=sfn.IntegrationPattern.WAIT_FOR_TASK_TOKEN,
+            timeout=Duration.hours(2),
+        )
+
+        # ── Step 9: Store Task Token and Wait for Delivery Completion ──
+        wait_for_completion = tasks.LambdaInvoke(
+            self,
+            "WaitForDeliveryCompletion",
+            lambda_function=compute_stack.functions["delivery-service"],
+            payload=sfn.TaskInput.from_object({
+                "action": "store_completion_token",
+                "delivery_id.$": "$.iteration.delivery_id",
+                "task_token": sfn.JsonPath.task_token,
+            }),
+            result_path="$.completion",
+            integration_pattern=sfn.IntegrationPattern.WAIT_FOR_TASK_TOKEN,
+            timeout=Duration.hours(2),
+        )
+
+        delivery_success = sfn.Succeed(
+            self,
+            "DeliveryProcessingComplete",
+            comment="Delivery completed successfully",
         )
 
         # ── Step 9: Check if More Drivers Available ──
@@ -503,7 +548,7 @@ class StepFunctionsStack(Stack):
         create_offer.next(check_offer_result
             .when(
                 sfn.Condition.string_equals("$.offer.status", "accepted"),
-                finalize_assignment.next(assignment_success),
+                finalize_assignment.next(update_order_driver_assigned).next(wait_for_pickup).next(wait_for_completion).next(delivery_success),
             )
             .when(
                 sfn.Condition.is_present("$.error"),
@@ -526,15 +571,15 @@ class StepFunctionsStack(Stack):
         # ── Create State Machine ──
         state_machine = sfn.StateMachine(
             self,
-            "DeliveryAssignmentStateMachine",
-            state_machine_name="FoodDelivery-DeliveryAssignment",
+            "DeliveryProcessingStateMachine",
+            state_machine_name="FoodDelivery-DeliveryProcessing",
             definition=definition,
             logs=sfn.LogOptions(
                 destination=self.delivery_workflow_log_group,
                 level=sfn.LogLevel.ALL,
             ),
             tracing_enabled=True,
-            timeout=Duration.minutes(15),
+            timeout=Duration.hours(3),  # Extended for full delivery lifecycle
         )
 
         return state_machine

@@ -402,6 +402,7 @@ body {
 .status-delivered { background: #d4edda; color: var(--success); }
 .status-completed { background: #d4edda; color: var(--success); }
 .status-cancelled { background: #f8d7da; color: #721c24; }
+.status-failed { background: #f8d7da; color: #721c24; }
 
 .tracking-timeline {
     margin-top: 2rem;

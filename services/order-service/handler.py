@@ -14,11 +14,12 @@ from boto3.dynamodb.conditions import Key
 
 # todos are left, you can decide to implement it or not.
 
-dynamodb = boto3.resource("dynamodb")
-events = boto3.client("events")
-sqs = boto3.client("sqs")
-stepfunctions = boto3.client("stepfunctions")
-ssm = boto3.client("ssm")
+REGION = os.environ.get("AWS_REGION", "us-west-1")
+dynamodb = boto3.resource("dynamodb", region_name=REGION)
+events = boto3.client("events", region_name=REGION)
+sqs = boto3.client("sqs", region_name=REGION)
+stepfunctions = boto3.client("stepfunctions", region_name=REGION)
+ssm = boto3.client("ssm", region_name=REGION)
 
 ORDERS_TABLE = os.environ.get("ORDERS_TABLE_NAME", "FoodDelivery-Orders")
 CARTS_TABLE = os.environ.get("CARTS_TABLE_NAME", "FoodDelivery-Carts")
@@ -480,11 +481,12 @@ def handle_get_order(order_id: str, user_id: str):
     delivery_id = item.get("delivery_id")
     if delivery_id:
         try:
-            deliveries_table = dynamodb.Table(os.environ.get("DELIVERIES_TABLE", "FoodDelivery-Deliveries"))
+            deliveries_table = dynamodb.Table(os.environ.get("DELIVERIES_TABLE_NAME", "FoodDelivery-Deliveries"))
             delivery_res = deliveries_table.get_item(Key={"delivery_id": delivery_id})
             delivery = delivery_res.get("Item")
             if delivery and delivery.get("driver_id") == user_id:
                 is_driver = True
+                print(f"Driver {user_id} granted access to order {order_id} via delivery_id")
         except Exception as e:
             print(f"Error checking driver access via delivery_id: {str(e)}")
 
@@ -492,29 +494,38 @@ def handle_get_order(order_id: str, user_id: str):
     # This handles the timing issue where driver accepts but order hasn't been updated yet
     if not is_driver:
         try:
-            deliveries_table = dynamodb.Table(os.environ.get("DELIVERIES_TABLE", "FoodDelivery-Deliveries"))
+            table_name = os.environ.get("DELIVERIES_TABLE_NAME", "FoodDelivery-Deliveries")
+            print(f"Method 2: Checking deliveries table for order_id={order_id}, driver_id={user_id}")
+            print(f"Method 2: Using table={table_name}, order_id type={type(order_id)}, driver_id type={type(user_id)}")
+            deliveries_table = dynamodb.Table(table_name)
             from boto3.dynamodb.conditions import Attr
             delivery_scan = deliveries_table.scan(
-                FilterExpression=Attr("order_id").eq(order_id) & Attr("driver_id").eq(user_id),
-                Limit=1
+                FilterExpression=Attr("order_id").eq(order_id) & Attr("driver_id").eq(user_id)
             )
-            if delivery_scan.get("Items"):
+            print(f"Method 2: Scan response: {json.dumps(delivery_scan, default=str)}")
+            items = delivery_scan.get("Items", [])
+            print(f"Method 2: Found {len(items)} delivery records")
+            if items:
                 is_driver = True
                 print(f"Driver {user_id} granted access to order {order_id} via delivery scan")
         except Exception as e:
             print(f"Error checking driver access via order_id scan: {str(e)}")
+            import traceback
+            print(f"Traceback: {traceback.format_exc()}")
 
     # Method 3: Check driver offers table for accepted offers
     # This is the most immediate check - offers are updated instantly when driver accepts
     if not is_driver:
         try:
-            driver_offers_table = dynamodb.Table(os.environ.get("DRIVER_OFFERS_TABLE", "FoodDelivery-DriverOffers"))
+            print(f"Method 3: Checking offers table for order_id={order_id}, driver_id={user_id}")
+            driver_offers_table = dynamodb.Table(os.environ.get("DRIVER_OFFERS_TABLE_NAME", "FoodDelivery-DriverOffers"))
             from boto3.dynamodb.conditions import Attr
             offer_scan = driver_offers_table.scan(
-                FilterExpression=Attr("order_id").eq(order_id) & Attr("driver_id").eq(user_id) & Attr("status").eq("accepted"),
-                Limit=1
+                FilterExpression=Attr("order_id").eq(order_id) & Attr("driver_id").eq(user_id) & Attr("status").eq("accepted")
             )
-            if offer_scan.get("Items"):
+            items = offer_scan.get("Items", [])
+            print(f"Method 3: Found {len(items)} accepted offers")
+            if items:
                 is_driver = True
                 print(f"Driver {user_id} granted access to order {order_id} via accepted offer")
         except Exception as e:
