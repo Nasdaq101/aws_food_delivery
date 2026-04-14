@@ -163,6 +163,7 @@ def handle_order_status_changed(detail):
             "type": "status",
             "order_id": order_id,
             "status": status,
+            "delivery_id": delivery_id,  # Include delivery_id in the message
             "timestamp": timestamp,
         }
 
