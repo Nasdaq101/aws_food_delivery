@@ -134,7 +134,7 @@ function handleWebSocketMessage(data) {
     }
 }
 
-function updateOrderStatus(data) {
+async function updateOrderStatus(data) {
     console.log("Order status update:", data);
 
     const status = (data.status || "").toLowerCase();
@@ -170,7 +170,73 @@ function updateOrderStatus(data) {
         if (trackingInfo && trackingInfo.innerHTML.includes(data.order_id.substring(0, 8))) {
             console.log("Updating status-based info in-place");
             // Find and update the status-based info section
-            updateStatusBasedInfo(data.status, data.order_id);
+            updateStatusBasedInfo(data.status, data.order_id, data.delivery_id);
+        }
+    }
+
+    // HYBRID APPROACH: Show driver position based on delivery workflow
+    if ((status === "driver_assigned" || status === "picked_up" || status === "delivering" || status === "delivered") && data.delivery_id && trackingMap && currentOrderData) {
+        console.log(`🚗 [HYBRID] Driver position update for status: ${status.toUpperCase()}`);
+
+        const restaurantLoc = parseLocation(currentOrderData.restaurant_location, { lat: 37.7849, lng: -122.4094 });
+        const deliveryLoc = parseLocation(currentOrderData.delivery_address, { lat: 37.7749, lng: -122.4194 });
+        let driverLoc = null;
+
+        try {
+            if (status === "picked_up") {
+                // LOGICAL POSITION: Driver just picked up food at restaurant
+                console.log("📦 [PICKED_UP] Snapping driver to restaurant location");
+                driverLoc = restaurantLoc;
+
+            } else if (status === "delivered") {
+                // LOGICAL POSITION: Driver just delivered at customer location
+                console.log("🏠 [DELIVERED] Snapping driver to customer location");
+                driverLoc = deliveryLoc;
+
+            } else if (status === "driver_assigned" || status === "delivering") {
+                // REAL GPS: Fetch driver's actual location for moving states
+                console.log(`🛰️ [${status.toUpperCase()}] Fetching driver's GPS location...`);
+
+                const deliveryData = await apiCall(`/deliveries/${data.delivery_id}`);
+
+                if (deliveryData && deliveryData.driver_id) {
+                    const driverId = deliveryData.driver_id;
+                    const driverData = await apiCall(`/drivers/${driverId}`);
+
+                    if (driverData && driverData.location && Object.keys(driverData.location).length > 0) {
+                        driverLoc = parseLocation(driverData.location);
+                        console.log(`✅ [GPS] Driver location:`, driverLoc);
+                    }
+                }
+
+                // Fallback to logical position if GPS unavailable
+                if (!driverLoc) {
+                    if (status === "driver_assigned") {
+                        console.log("⚠️ No GPS - using restaurant as fallback for DRIVER_ASSIGNED");
+                        driverLoc = restaurantLoc;
+                    } else if (status === "delivering") {
+                        console.log("⚠️ No GPS - using midpoint for DELIVERING");
+                        driverLoc = {
+                            lat: (restaurantLoc.lat + deliveryLoc.lat) / 2,
+                            lng: (restaurantLoc.lng + deliveryLoc.lng) / 2
+                        };
+                    }
+                }
+            }
+
+            // Update map with driver position
+            if (driverLoc && driverLoc.lat && driverLoc.lng) {
+                console.log(`🗺️ Updating map: Driver at [${driverLoc.lat.toFixed(4)}, ${driverLoc.lng.toFixed(4)}]`);
+                updateDriverMarkerOnMap(driverLoc.lat, driverLoc.lng);
+                drawRoute(restaurantLoc, driverLoc, deliveryLoc);
+                fitMapBounds(restaurantLoc, deliveryLoc, driverLoc, status);
+                console.log("✅ Driver marker updated successfully");
+            } else {
+                console.log("❌ No valid driver location - marker not shown");
+            }
+
+        } catch (err) {
+            console.error("❌ Failed to update driver position:", err);
         }
     }
 
@@ -190,7 +256,7 @@ function updateOrderStatus(data) {
     showToast(message, status === "cancelled" ? "error" : "success");
 }
 
-function updateStatusBasedInfo(status, orderId) {
+function updateStatusBasedInfo(status, orderId, deliveryId = null) {
     // Find the status-based info container
     const statusInfoContainer = document.getElementById("status-based-info");
     if (!statusInfoContainer) {
@@ -198,9 +264,13 @@ function updateStatusBasedInfo(status, orderId) {
         return;
     }
 
-    // Update the stored order's status
+    // Update the stored order's status and delivery_id
     if (currentTrackedOrder) {
         currentTrackedOrder.status = status;
+        if (deliveryId) {
+            currentTrackedOrder.delivery_id = deliveryId;
+            console.log("Updated currentTrackedOrder with delivery_id:", deliveryId);
+        }
     } else {
         console.log("No current tracked order");
         return;
@@ -271,12 +341,15 @@ function initializeTrackingMap(orderData) {
     }
 
     // Add driver marker if available
-    if (driverLoc) {
+    console.log("Driver location parsed:", driverLoc);
+    if (driverLoc && driverLoc.lat && driverLoc.lng) {
+        console.log("Adding driver marker at:", driverLoc.lat, driverLoc.lng);
         updateDriverMarkerOnMap(driverLoc.lat, driverLoc.lng);
 
         // Draw route: Restaurant -> Driver -> Destination
         drawRoute(restaurantLoc, driverLoc, deliveryLoc);
     } else {
+        console.log("No valid driver location, drawing route without driver");
         // Draw direct line from restaurant to destination (before driver assigned)
         drawRoute(restaurantLoc, null, deliveryLoc);
     }
@@ -288,20 +361,46 @@ function initializeTrackingMap(orderData) {
 function parseLocation(locationData, fallback = null) {
     if (!locationData) return fallback;
 
+    console.log("Parsing location data:", locationData);
+
     // Handle different formats: {lat, lng}, "lat,lng", {latitude, longitude}
     if (typeof locationData === 'string') {
         const parts = locationData.split(',');
         if (parts.length === 2) {
-            return { lat: parseFloat(parts[0]), lng: parseFloat(parts[1]) };
+            const parsed = { lat: parseFloat(parts[0]), lng: parseFloat(parts[1]) };
+            console.log("Parsed from string:", parsed);
+            return parsed;
         }
     } else if (typeof locationData === 'object') {
+        // Check for empty object
+        if (Object.keys(locationData).length === 0) {
+            console.log("Empty location object, using fallback");
+            return fallback;
+        }
+
+        // Standard format: {lat, lng}
         if (locationData.lat !== undefined && locationData.lng !== undefined) {
-            return { lat: parseFloat(locationData.lat), lng: parseFloat(locationData.lng) };
-        } else if (locationData.latitude !== undefined && locationData.longitude !== undefined) {
-            return { lat: parseFloat(locationData.latitude), lng: parseFloat(locationData.longitude) };
+            const parsed = { lat: parseFloat(locationData.lat), lng: parseFloat(locationData.lng) };
+            console.log("Parsed from lat/lng:", parsed);
+            return parsed;
+        }
+
+        // Alternative format: {latitude, longitude}
+        if (locationData.latitude !== undefined && locationData.longitude !== undefined) {
+            const parsed = { lat: parseFloat(locationData.latitude), lng: parseFloat(locationData.longitude) };
+            console.log("Parsed from latitude/longitude:", parsed);
+            return parsed;
+        }
+
+        // DynamoDB Decimal format: numbers might be strings
+        if (typeof locationData.lat === 'string' && typeof locationData.lng === 'string') {
+            const parsed = { lat: parseFloat(locationData.lat), lng: parseFloat(locationData.lng) };
+            console.log("Parsed from string numbers:", parsed);
+            return parsed;
         }
     }
 
+    console.log("Could not parse location, using fallback:", fallback);
     return fallback;
 }
 
@@ -532,6 +631,24 @@ function getStatusBasedInfo(order) {
                 <h4 style="margin: 0 0 0.5rem 0; font-size: 1.2rem; color: #155724;">🎉 Delivered!</h4>
                 <p style="color: #155724; margin: 0; font-size: 0.9rem;">
                     Your order has been delivered. Enjoy your meal!
+                </p>
+            </div>
+        `;
+    } else if (status === "FAILED") {
+        return `
+            <div style="background: linear-gradient(135deg, #f8d7da 0%, #f5c6cb 100%); padding: 1.5rem; border-radius: 8px; border-left: 4px solid #dc3545; text-align: center;">
+                <h4 style="margin: 0 0 0.5rem 0; font-size: 1.2rem; color: #721c24;">❌ Order Failed</h4>
+                <p style="color: #721c24; margin: 0; font-size: 0.9rem;">
+                    Unfortunately, this order could not be completed. ${order.failure_reason || 'No available drivers were found to deliver your order.'} Please try placing a new order.
+                </p>
+            </div>
+        `;
+    } else if (status === "CANCELLED") {
+        return `
+            <div style="background: linear-gradient(135deg, #f8d7da 0%, #f5c6cb 100%); padding: 1.5rem; border-radius: 8px; border-left: 4px solid #dc3545; text-align: center;">
+                <h4 style="margin: 0 0 0.5rem 0; font-size: 1.2rem; color: #721c24;">🚫 Order Cancelled</h4>
+                <p style="color: #721c24; margin: 0; font-size: 0.9rem;">
+                    This order has been cancelled. ${order.cancellation_reason || 'You can place a new order anytime.'}
                 </p>
             </div>
         `;
@@ -1393,6 +1510,59 @@ async function trackOrder(orderId) {
             driver_location: order.driver_location || null, // Will be updated via WebSocket
             status: order.status
         };
+
+        // HYBRID APPROACH: Determine driver location based on order status
+        const orderStatus = (order.status || "").toLowerCase();
+        console.log(`🚗 [INITIAL LOAD] Order status: ${orderStatus.toUpperCase()}`);
+
+        if (order.delivery_id && (orderStatus === "driver_assigned" || orderStatus === "picked_up" || orderStatus === "delivering" || orderStatus === "delivered")) {
+            const restaurantLoc = parseLocation(order.restaurant_location, { lat: 37.7849, lng: -122.4094 });
+            const deliveryLoc = parseLocation(order.delivery_address, { lat: 37.7749, lng: -122.4194 });
+
+            if (orderStatus === "picked_up") {
+                // LOGICAL: Driver just picked up at restaurant
+                console.log("📦 [PICKED_UP] Driver position: Restaurant");
+                mapData.driver_location = restaurantLoc;
+
+            } else if (orderStatus === "delivered") {
+                // LOGICAL: Driver delivered at customer location
+                console.log("🏠 [DELIVERED] Driver position: Customer location");
+                mapData.driver_location = deliveryLoc;
+
+            } else if (orderStatus === "driver_assigned" || orderStatus === "delivering") {
+                // REAL GPS: Fetch driver's actual location
+                console.log(`🛰️ [${orderStatus.toUpperCase()}] Fetching driver GPS...`);
+                try {
+                    const deliveryData = await apiCall(`/deliveries/${order.delivery_id}`);
+
+                    if (deliveryData && deliveryData.driver_id) {
+                        const driverData = await apiCall(`/drivers/${deliveryData.driver_id}`);
+
+                        if (driverData && driverData.location && Object.keys(driverData.location).length > 0) {
+                            mapData.driver_location = driverData.location;
+                            console.log("✅ [GPS] Driver location set:", mapData.driver_location);
+                        } else {
+                            console.log("⚠️ No GPS data - using fallback");
+                            // Fallback to logical position
+                            if (orderStatus === "driver_assigned") {
+                                mapData.driver_location = restaurantLoc;
+                            } else {
+                                mapData.driver_location = {
+                                    lat: (restaurantLoc.lat + deliveryLoc.lat) / 2,
+                                    lng: (restaurantLoc.lng + deliveryLoc.lng) / 2
+                                };
+                            }
+                        }
+                    }
+                } catch (err) {
+                    console.error("Failed to fetch driver location:", err);
+                }
+            }
+        } else {
+            console.log("No delivery_id or status doesn't require driver marker");
+        }
+
+        console.log("Final mapData:", mapData);
         initializeTrackingMap(mapData);
 
         // Subscribe to WebSocket updates for this order
@@ -2087,7 +2257,43 @@ function initDriverDeliveryMap(orderData) {
     // Parse locations from order data (same as customer map)
     const restaurantLoc = parseLocation(orderData.restaurant_location, { lat: 37.7849, lng: -122.4094 });
     const deliveryLoc = parseLocation(orderData.delivery_address, { lat: 37.7749, lng: -122.4194 });
-    const driverLoc = orderData.driver_location ? parseLocation(orderData.driver_location) : null;
+
+    // HYBRID APPROACH: Determine driver position based on order status
+    const orderStatus = (orderData.status || "").toLowerCase();
+    console.log(`🚗 [DRIVER MAP] Order status: ${orderStatus.toUpperCase()}`);
+
+    let driverLoc = null;
+
+    if (orderStatus === "picked_up") {
+        // LOGICAL: Driver just picked up at restaurant
+        console.log("📦 [DRIVER MAP] Driver at restaurant (just picked up)");
+        driverLoc = restaurantLoc;
+    } else if (orderStatus === "delivered") {
+        // LOGICAL: Driver at customer location (just delivered)
+        console.log("🏠 [DRIVER MAP] Driver at customer location (just delivered)");
+        driverLoc = deliveryLoc;
+    } else {
+        // REAL GPS: Use driver's actual location for moving states
+        console.log("🛰️ [DRIVER MAP] Using driver GPS location");
+        driverLoc = orderData.driver_location ? parseLocation(orderData.driver_location) : null;
+
+        // Fallback if no GPS
+        if (!driverLoc) {
+            if (orderStatus === "driver_assigned") {
+                console.log("⚠️ [DRIVER MAP] No GPS - defaulting to restaurant");
+                driverLoc = restaurantLoc;
+            } else if (orderStatus === "delivering") {
+                console.log("⚠️ [DRIVER MAP] No GPS - using midpoint");
+                driverLoc = {
+                    lat: (restaurantLoc.lat + deliveryLoc.lat) / 2,
+                    lng: (restaurantLoc.lng + deliveryLoc.lng) / 2
+                };
+            } else {
+                // Default fallback
+                driverLoc = restaurantLoc;
+            }
+        }
+    }
 
     // Initialize fresh map
     driverDeliveryMap = L.map(mapDiv).setView([restaurantLoc.lat, restaurantLoc.lng], 13);
