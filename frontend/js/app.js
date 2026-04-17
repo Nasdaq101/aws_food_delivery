@@ -1976,7 +1976,7 @@ async function loadDriverDeliveries() {
 
     try {
         const data = await apiCall("/deliveries");
-        const deliveries = data.deliveries || [];
+        let deliveries = data.deliveries || [];
 
         if (deliveries.length === 0) {
             container.innerHTML = `
@@ -1988,32 +1988,314 @@ async function loadDriverDeliveries() {
             return;
         }
 
-        container.innerHTML = deliveries.map(delivery => `
-            <div class="order-card" style="margin-bottom: 1rem;">
-                <div style="display: flex; justify-content: space-between; align-items: center;">
-                    <div>
-                        <h4>Delivery #${delivery.delivery_id.substring(0, 8)}</h4>
-                        <p style="color: var(--text-light); font-size: 0.9rem;">
-                            Order: ${delivery.order_id?.substring(0, 8)}
+        // Sort deliveries by created_at (most recent first)
+        deliveries.sort((a, b) => {
+            const dateA = new Date(a.created_at || a.updated_at);
+            const dateB = new Date(b.created_at || b.updated_at);
+            return dateB - dateA; // Descending order (newest first)
+        });
+
+        container.innerHTML = deliveries.map(delivery => {
+            // Determine status badge color
+            const statusUpper = (delivery.status || '').toUpperCase();
+            let badgeColor, badgeBg;
+
+            if (statusUpper === 'DELIVERED' || statusUpper === 'COMPLETED') {
+                badgeColor = '#1B5E20';
+                badgeBg = '#C8E6C9';
+            } else if (statusUpper === 'DELIVERING') {
+                badgeColor = '#1565C0';
+                badgeBg = '#BBDEFB';
+            } else if (statusUpper === 'PICKED_UP') {
+                badgeColor = '#E65100';
+                badgeBg = '#FFE0B2';
+            } else if (statusUpper === 'ASSIGNED') {
+                badgeColor = '#6A1B9A';
+                badgeBg = '#E1BEE7';
+            } else {
+                badgeColor = '#F57F17';
+                badgeBg = '#FFF9C4';
+            }
+
+            return `
+                <div class="order-card delivery-card-clickable"
+                     style="margin-bottom: 1rem; cursor: pointer; transition: transform 0.2s, box-shadow 0.2s;"
+                     onclick="navigateToDeliveryDetails('${delivery.delivery_id}', '${delivery.order_id}')"
+                     onmouseenter="this.style.transform='translateY(-2px)'; this.style.boxShadow='0 4px 12px rgba(0,0,0,0.15)'"
+                     onmouseleave="this.style.transform='translateY(0)'; this.style.boxShadow='0 2px 8px rgba(0,0,0,0.1)'">
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <div>
+                            <h4>Delivery #${delivery.delivery_id.substring(0, 8)}</h4>
+                            <p style="color: var(--text-light); font-size: 0.9rem;">
+                                Order: ${delivery.order_id?.substring(0, 8)}
+                            </p>
+                        </div>
+                        <span style="padding: 0.4rem 0.8rem; border-radius: 12px; font-size: 0.85rem; font-weight: 600; color: ${badgeColor}; background-color: ${badgeBg};">
+                            ${delivery.status}
+                        </span>
+                    </div>
+                    <p style="margin-top: 0.5rem;">
+                        📍 ${delivery.customer_address || 'N/A'}
+                    </p>
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 0.5rem;">
+                        <p style="color: var(--text-light); font-size: 0.9rem; margin: 0;">
+                            🕐 ${new Date(delivery.created_at).toLocaleString()}
+                        </p>
+                        <p style="color: var(--primary); font-size: 0.85rem; margin: 0; font-weight: 500;">
+                            Click to view details →
                         </p>
                     </div>
-                    <span class="badge badge-${delivery.status === 'completed' ? 'success' : 'warning'}">
-                        ${delivery.status}
-                    </span>
                 </div>
-                <p style="margin-top: 0.5rem;">
-                    ${delivery.customer_address || 'N/A'}
-                </p>
-                <p style="color: var(--text-light); font-size: 0.9rem;">
-                    ${new Date(delivery.created_at).toLocaleString()}
-                </p>
-            </div>
-        `).join('');
+            `;
+        }).join('');
 
     } catch (err) {
         console.error("Error loading deliveries:", err);
         container.innerHTML = '<p>Failed to load deliveries</p>';
     }
+}
+
+// Navigate to delivery details page
+function navigateToDeliveryDetails(deliveryId, orderId) {
+    console.log(`Navigating to delivery details: ${deliveryId}`);
+
+    // Store the delivery ID and order ID in localStorage for the details page
+    localStorage.setItem('currentDeliveryId', deliveryId);
+    localStorage.setItem('currentOrderId', orderId);
+
+    // Navigate to delivery details page
+    showPage('driver-delivery-details');
+
+    // Load the delivery details
+    loadDeliveryDetails(deliveryId, orderId);
+}
+
+// Load delivery details (reuse existing function or fetch fresh data)
+async function loadDeliveryDetails(deliveryId, orderId) {
+    const container = document.getElementById('delivery-detail-content');
+    if (!container) {
+        console.error('delivery-detail-content container not found');
+        return;
+    }
+
+    container.innerHTML = '<p>Loading delivery details...</p>';
+
+    try {
+        console.log(`Fetching details for delivery: ${deliveryId}, order: ${orderId}`);
+
+        // Fetch both delivery and order data
+        const [deliveryData, orderData] = await Promise.all([
+            apiCall(`/deliveries/${deliveryId}`),
+            apiCall(`/orders/${orderId}`)
+        ]);
+
+        console.log('Delivery data:', deliveryData);
+        console.log('Order data:', orderData);
+
+        const delivery = deliveryData.delivery || deliveryData;
+        const order = orderData.order || orderData;
+
+        if (!delivery && !order) {
+            container.innerHTML = '<p>Delivery not found</p>';
+            return;
+        }
+
+        // Display the delivery details
+        renderDeliveryDetailsContent(order, delivery, deliveryId);
+
+    } catch (err) {
+        console.error("Error loading delivery details:", err);
+        container.innerHTML = `
+            <div style="padding: 2rem; text-align: center;">
+                <p style="color: var(--danger); margin-bottom: 1rem;">Failed to load delivery details</p>
+                <p style="color: var(--text-light); font-size: 0.9rem;">${err.message || 'Unknown error'}</p>
+                <button class="btn btn-secondary" onclick="showPage('driver-deliveries')" style="margin-top: 1rem;">
+                    ← Back to My Deliveries
+                </button>
+            </div>
+        `;
+    }
+}
+
+function renderDeliveryDetailsContent(order, delivery, deliveryId) {
+    const container = document.getElementById('delivery-detail-content');
+    if (!container) return;
+
+    // Use data from both order and delivery - FIX: Use correct field names
+    const items = order?.items || [];
+    const totalItems = items.reduce((sum, item) => sum + (parseInt(item.quantity) || 0), 0);
+    const orderStatus = delivery?.status || order?.status || 'UNKNOWN';
+    const deliveryAddress = delivery?.customer_address || order?.delivery_address_display || order?.delivery_address || 'N/A';
+    const restaurantAddress = order?.restaurant_address_display || order?.restaurant_address || 'Restaurant address';
+    const orderTotal = parseFloat(order?.total) || 0;
+
+    // Determine status badge color
+    const statusUpper = orderStatus.toUpperCase();
+    let badgeColor, badgeBg;
+
+    if (statusUpper === 'DELIVERED' || statusUpper === 'COMPLETED') {
+        badgeColor = '#1B5E20';
+        badgeBg = '#C8E6C9';
+    } else if (statusUpper === 'DELIVERING') {
+        badgeColor = '#1565C0';
+        badgeBg = '#BBDEFB';
+    } else if (statusUpper === 'PICKED_UP') {
+        badgeColor = '#E65100';
+        badgeBg = '#FFE0B2';
+    } else if (statusUpper === 'ASSIGNED' || statusUpper === 'DRIVER_ASSIGNED') {
+        badgeColor = '#6A1B9A';
+        badgeBg = '#E1BEE7';
+    } else {
+        badgeColor = '#F57F17';
+        badgeBg = '#FFF9C4';
+    }
+
+    // Build timeline data
+    const timelineEvents = [];
+
+    if (delivery?.created_at) {
+        timelineEvents.push({
+            icon: '📋',
+            label: 'Order Assigned',
+            time: new Date(delivery.created_at).toLocaleString(),
+            color: '#6A1B9A'
+        });
+    }
+
+    if (delivery?.pickup_time) {
+        timelineEvents.push({
+            icon: '✅',
+            label: 'Picked Up',
+            time: new Date(delivery.pickup_time).toLocaleString(),
+            color: '#E65100'
+        });
+    }
+
+    if (delivery?.delivery_time) {
+        timelineEvents.push({
+            icon: '🎉',
+            label: 'Delivered',
+            time: new Date(delivery.delivery_time).toLocaleString(),
+            color: '#1B5E20'
+        });
+    }
+
+    container.innerHTML = `
+        <!-- Back Button at Top -->
+        <div style="margin-bottom: 1.5rem;">
+            <button class="btn btn-outline" onclick="showPage('driver-deliveries')" style="display: inline-flex; align-items: center; gap: 0.5rem;">
+                <span>←</span>
+                <span>Back to My Deliveries</span>
+            </button>
+        </div>
+
+        <!-- Header Card -->
+        <div style="background: linear-gradient(135deg, #e63946 0%, #c1121f 100%); border-radius: var(--radius); padding: 2rem; margin-bottom: 1.5rem; color: white; box-shadow: var(--shadow);">
+            <div style="display: flex; justify-content: space-between; align-items: start; flex-wrap: wrap; gap: 1rem;">
+                <div>
+                    <p style="opacity: 0.9; font-size: 0.9rem; margin: 0 0 0.5rem 0;">Delivery ID</p>
+                    <h2 style="margin: 0; font-size: 1.75rem; font-weight: 700;">#${deliveryId.substring(0, 8).toUpperCase()}</h2>
+                </div>
+                <span style="padding: 0.6rem 1.2rem; border-radius: 20px; font-size: 0.9rem; font-weight: 600; color: ${badgeColor}; background-color: white; box-shadow: 0 4px 12px rgba(0,0,0,0.1);">
+                    ${orderStatus}
+                </span>
+            </div>
+        </div>
+
+        <!-- Order Summary Card -->
+        <div style="background: var(--white); border-radius: var(--radius); padding: 1.75rem; margin-bottom: 1.5rem; box-shadow: var(--shadow); border: 1px solid var(--border);">
+            <h3 style="margin: 0 0 1.25rem 0; font-size: 1.15rem; color: var(--text); display: flex; align-items: center; gap: 0.5rem;">
+                <span style="font-size: 1.3rem;">📦</span>
+                Order Summary
+            </h3>
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 1.25rem;">
+                <div style="padding: 1rem; background: var(--bg); border-radius: var(--radius); border-left: 4px solid var(--primary);">
+                    <p style="color: var(--text-light); font-size: 0.85rem; margin: 0 0 0.4rem 0; font-weight: 500;">Order ID</p>
+                    <p style="font-weight: 600; font-size: 1rem; margin: 0; color: var(--text);">#${order?.order_id?.substring(0, 8).toUpperCase() || 'N/A'}</p>
+                </div>
+                <div style="padding: 1rem; background: var(--bg); border-radius: var(--radius); border-left: 4px solid var(--secondary);">
+                    <p style="color: var(--text-light); font-size: 0.85rem; margin: 0 0 0.4rem 0; font-weight: 500;">Total Items</p>
+                    <p style="font-weight: 600; font-size: 1rem; margin: 0; color: var(--text);">${totalItems}</p>
+                </div>
+                <div style="padding: 1rem; background: var(--bg); border-radius: var(--radius); border-left: 4px solid var(--success);">
+                    <p style="color: var(--text-light); font-size: 0.85rem; margin: 0 0 0.4rem 0; font-weight: 500;">Total Amount</p>
+                    <p style="font-weight: 700; font-size: 1.15rem; margin: 0; color: var(--success);">$${orderTotal.toFixed(2)}</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Order Items Card -->
+        ${items.length > 0 ? `
+            <div style="background: var(--white); border-radius: var(--radius); padding: 1.75rem; margin-bottom: 1.5rem; box-shadow: var(--shadow); border: 1px solid var(--border);">
+                <h3 style="margin: 0 0 1.25rem 0; font-size: 1.15rem; color: var(--text); display: flex; align-items: center; gap: 0.5rem;">
+                    <span style="font-size: 1.3rem;">🍽️</span>
+                    Order Items
+                </h3>
+                <div style="display: flex; flex-direction: column; gap: 0.75rem;">
+                    ${items.map((item, idx) => {
+                        const unitPrice = parseInt(item.unit_price_cents) / 100;
+                        const quantity = parseInt(item.quantity);
+                        const lineTotal = unitPrice * quantity;
+                        return `
+                            <div style="display: flex; justify-content: space-between; align-items: center; padding: 1rem; background: var(--bg); border-radius: var(--radius); ${idx === items.length - 1 ? '' : 'border-bottom: 2px solid var(--border);'}">
+                                <div style="flex: 1;">
+                                    <p style="font-weight: 600; margin: 0 0 0.25rem 0; color: var(--text); font-size: 1rem;">${item.name}</p>
+                                    <p style="color: var(--text-light); font-size: 0.875rem; margin: 0;">
+                                        $${unitPrice.toFixed(2)} × ${quantity}
+                                    </p>
+                                </div>
+                                <p style="font-weight: 700; font-size: 1.1rem; margin: 0; color: var(--success);">$${lineTotal.toFixed(2)}</p>
+                            </div>
+                        `;
+                    }).join('')}
+                </div>
+            </div>
+        ` : ''}
+
+        <!-- Locations Card -->
+        <div style="background: var(--white); border-radius: var(--radius); padding: 1.75rem; margin-bottom: 1.5rem; box-shadow: var(--shadow); border: 1px solid var(--border);">
+            <h3 style="margin: 0 0 1.25rem 0; font-size: 1.15rem; color: var(--text); display: flex; align-items: center; gap: 0.5rem;">
+                <span style="font-size: 1.3rem;">📍</span>
+                Locations
+            </h3>
+            <div style="display: flex; flex-direction: column; gap: 1.25rem;">
+                <div style="padding: 1.25rem; background: #ffe5e8; border-radius: var(--radius); border-left: 4px solid var(--primary);">
+                    <p style="font-weight: 600; margin: 0 0 0.5rem 0; color: var(--primary-dark); font-size: 0.9rem;">🍽️ PICKUP LOCATION</p>
+                    <p style="margin: 0; color: var(--text); font-size: 1rem; line-height: 1.5;">${restaurantAddress}</p>
+                </div>
+                <div style="padding: 1.25rem; background: #ddf0f7; border-radius: var(--radius); border-left: 4px solid var(--secondary);">
+                    <p style="font-weight: 600; margin: 0 0 0.5rem 0; color: #2c5f7c; font-size: 0.9rem;">🏠 DELIVERY LOCATION</p>
+                    <p style="margin: 0; color: var(--text); font-size: 1rem; line-height: 1.5;">${deliveryAddress}</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Timeline Card -->
+        ${timelineEvents.length > 0 ? `
+            <div style="background: var(--white); border-radius: var(--radius); padding: 1.75rem; margin-bottom: 1.5rem; box-shadow: var(--shadow); border: 1px solid var(--border);">
+                <h3 style="margin: 0 0 1.25rem 0; font-size: 1.15rem; color: var(--text); display: flex; align-items: center; gap: 0.5rem;">
+                    <span style="font-size: 1.3rem;">⏱️</span>
+                    Delivery Timeline
+                </h3>
+                <div style="position: relative; padding-left: 2.5rem;">
+                    ${timelineEvents.map((event, idx) => `
+                        <div style="position: relative; padding-bottom: ${idx === timelineEvents.length - 1 ? '0' : '1.75rem'};">
+                            ${idx !== timelineEvents.length - 1 ? `
+                                <div style="position: absolute; left: -1.65rem; top: 2.5rem; bottom: -0.5rem; width: 2px; background: linear-gradient(to bottom, ${event.color} 0%, var(--border) 100%);"></div>
+                            ` : ''}
+                            <div style="position: absolute; left: -2.25rem; top: 0.25rem; width: 2.5rem; height: 2.5rem; background: var(--white); border: 3px solid ${event.color}; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 1.1rem; box-shadow: var(--shadow);">
+                                ${event.icon}
+                            </div>
+                            <div style="padding: 0.75rem 1.25rem; background: var(--bg); border-radius: var(--radius); border-left: 3px solid ${event.color};">
+                                <p style="font-weight: 600; margin: 0 0 0.3rem 0; color: var(--text); font-size: 1rem;">${event.label}</p>
+                                <p style="color: var(--text-light); margin: 0; font-size: 0.9rem;">📅 ${event.time}</p>
+                            </div>
+                        </div>
+                    `).join('')}
+                </div>
+            </div>
+        ` : ''}
+    `;
 }
 
 // ========================================
