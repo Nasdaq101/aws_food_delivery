@@ -137,7 +137,7 @@ def lambda_handler(event, context):
             return response(404, {"error": "Not found", "path": path})
 
         if idx == len(segs) - 1:
-            return _list_deliveries()
+            return _list_deliveries(event)
         if idx == len(segs) - 2:
             return _get_delivery(segs[idx + 1], event)
 
@@ -146,12 +146,28 @@ def lambda_handler(event, context):
         return response(500, {"error": str(e)})
 
 
-def _list_deliveries():
+def _list_deliveries(event):
+    """List deliveries for the authenticated driver"""
     try:
-        scan = deliveries_table.scan(Limit=50)
+        # Get driver_id from authentication context
+        driver_id = event.get("requestContext", {}).get("authorizer", {}).get("claims", {}).get("sub")
+
+        if not driver_id:
+            return response(401, {"error": "Unauthorized", "message": "Driver ID required"})
+
+        # Scan for deliveries where driver_id matches
+        from boto3.dynamodb.conditions import Attr
+        scan = deliveries_table.scan(
+            FilterExpression=Attr("driver_id").eq(driver_id)
+        )
         items = scan.get("Items", [])
+
+        # Sort by created_at descending (most recent first)
+        items.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+
         return response(200, {"deliveries": items, "count": len(items)})
     except Exception as e:
+        print(f"Error listing deliveries: {str(e)}")
         return response(500, {"error": str(e)})
 
 
